@@ -135,7 +135,13 @@ async def test_on_call_tool_strips_goal_and_logs():
     # underlying tool ran WITHOUT goal
     assert box["received"] == {"text": "ab", "count": 2}
     assert res.structured_content == {"echoed": "abab", "count": 2}
-    # a well-formed record was written
+    # a session_start header precedes the first call record of the session
+    header = logger.records[0]
+    assert header["record"] == "session_start"
+    assert header["transport"] == "stdio"
+    assert header["result_mode"] == "always"
+    assert header["session_id"]
+    # a well-formed call record was written
     rec = logger.records[-1]
     assert rec["tool"] == "echo"
     assert rec["goal"] == "user asked to echo"
@@ -143,11 +149,12 @@ async def test_on_call_tool_strips_goal_and_logs():
     assert rec["arguments"]["text"] == "ab"
     assert rec["result"] is not None
     assert rec["result_logged"] is True
-    assert rec["session_id"]
+    assert rec["session_id"] == header["session_id"]
     assert rec["ts"]
     assert rec["status"] == "success"
     assert isinstance(rec["duration_ms"], float)
-    assert rec["transport"] == "stdio"
+    assert rec["seq"] == 1
+    assert len(rec["args_hash"]) == 12
     assert "arguments_truncated" in rec and "result_truncated" in rec
 
 
@@ -234,6 +241,8 @@ async def test_log_results_false_records_shape_only():
     assert rec["result_logged"] is False
     assert "123-45-6789" not in json.dumps(rec["result"])
     assert rec["result"]["_type"] == "object"
+    # v2 shape carries key NAMES (schema, not data) instead of a bare count.
+    assert rec["result"]["_keys"] == ["rows"]
 
 
 @pytest.mark.asyncio
@@ -258,7 +267,6 @@ async def test_on_call_tool_error_records_and_reraises():
 
     rec = logger.records[-1]
     assert rec["status"] == "error"
-    assert rec["is_error"] is True
     assert rec["error"] == "ValueError: kaboom"
 
 
@@ -325,6 +333,199 @@ def test_extract_output_prefers_structured_then_content():
     assert mw._extract_output(r3) is None
 
 
+# --------------------- v2: tool outcomes, failures mode, rescue ------------- #
+
+
+def _ctx(name, arguments):
+    msg = SimpleNamespace(name=name, arguments=arguments)
+    msg.model_copy = lambda update: SimpleNamespace(name=name, arguments=update["arguments"])
+    ctx = SimpleNamespace(message=msg, fastmcp_context=None)
+    ctx.copy = lambda **kw: SimpleNamespace(message=kw["message"], fastmcp_context=None)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_tool_declared_failure_fields_extracted():
+    """apply_failed & co. return as DATA (MCP success) — the record must say so."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio", log_results=False)
+
+    async def call_next(_):
+        return ToolResult(
+            structured_content={
+                "status": "apply_failed",
+                "message": "Viya rejected the operations (HTTP 400).",
+                "failed_operation_index": 2,
+            }
+        )
+
+    await mw.on_call_tool(_ctx("apply_report_operations", {"goal": "g", "report_id": "r"}), call_next)
+    rec = logger.records[-1]
+    assert rec["status"] == "success"  # MCP layer saw a normal result...
+    assert rec["tool_status"] == "apply_failed"  # ...but the tool declared failure
+    assert rec["is_tool_error"] is True
+    assert rec["failed_operation_index"] == 2
+    assert "Viya rejected" in rec["tool_message"]
+
+
+@pytest.mark.asyncio
+async def test_success_tool_status_is_not_an_error():
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio", log_results=False)
+
+    async def call_next(_):
+        return ToolResult(structured_content={"status": "applied", "report_id": "r"})
+
+    await mw.on_call_tool(_ctx("apply_report_operations", {"goal": "g"}), call_next)
+    rec = logger.records[-1]
+    assert rec["tool_status"] == "applied"
+    assert rec["is_tool_error"] is False
+    assert "tool_message" not in rec
+
+
+@pytest.mark.asyncio
+async def test_failures_mode_logs_full_result_only_on_failure():
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio", log_results="failures")
+
+    async def ok(_):
+        return ToolResult(structured_content={"status": "applied", "secret_rows": [1, 2, 3]})
+
+    async def failed(_):
+        return ToolResult(structured_content={"status": "apply_failed", "message": "boom"})
+
+    await mw.on_call_tool(_ctx("t", {"goal": "g"}), ok)
+    success_rec = logger.records[-1]
+    assert success_rec["result_logged"] is False
+    assert success_rec["result"]["_type"] == "object"  # shape only
+
+    await mw.on_call_tool(_ctx("t", {"goal": "g"}), failed)
+    failure_rec = logger.records[-1]
+    assert failure_rec["result_logged"] is True
+    assert failure_rec["result"]["status"] == "apply_failed"  # full content
+
+
+@pytest.mark.asyncio
+async def test_unparsed_tool_input_is_rescued():
+    """The {'__unparsedToolInput': {'raw': ...}} client bug is unwrapped so the
+    tool receives real arguments (and the record marks the rescue)."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+    seen = {}
+
+    async def call_next(c):
+        seen["args"] = dict(c.message.arguments)
+        return ToolResult(structured_content={"ok": True})
+
+    blob = json.dumps({"goal": "build it", "report_id": "r1", "operations": [{"addPage": {"pageName": "P"}}]})
+    await mw.on_call_tool(_ctx("apply_report_operations", {"__unparsedToolInput": {"raw": blob}}), call_next)
+    assert seen["args"] == {"report_id": "r1", "operations": [{"addPage": {"pageName": "P"}}]}
+    rec = logger.records[-1]
+    assert rec["input_rescued"] is True
+    assert rec["goal"] == "build it"
+
+
+@pytest.mark.asyncio
+async def test_goal_salvaged_from_unparseable_blob():
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    # Broken JSON that still contains a goal — coverage must not drop to null.
+    blob = '{"goal": "check parsing", "operations": [{'
+    await mw.on_call_tool(_ctx("t", {"__unparsedToolInput": {"raw": blob}}), call_next)
+    rec = logger.records[-1]
+    assert rec["goal"] == "check parsing"
+    assert "input_rescued" not in rec
+
+
+@pytest.mark.asyncio
+async def test_seq_increments_and_args_hash_stable_per_arguments():
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(_ctx("t", {"goal": "a", "x": 1}), call_next)
+    await mw.on_call_tool(_ctx("t", {"goal": "b", "x": 1}), call_next)
+    await mw.on_call_tool(_ctx("t", {"goal": "c", "x": 2}), call_next)
+    calls = [r for r in logger.records if r.get("record") != "session_start"]
+    assert [r["seq"] for r in calls] == [1, 2, 3]
+    # goal is excluded from the hash: identical arguments -> identical hash.
+    assert calls[0]["args_hash"] == calls[1]["args_hash"]
+    assert calls[0]["args_hash"] != calls[2]["args_hash"]
+
+
+@pytest.mark.asyncio
+async def test_error_text_scrubs_viya_host():
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+    mw._viya_host = "viya.internal.example.com"
+
+    async def call_next(_):
+        raise RuntimeError("404 for url 'https://viya.internal.example.com/casManagement/x'")
+
+    with pytest.raises(RuntimeError):
+        await mw.on_call_tool(_ctx("t", {"goal": "g"}), call_next)
+    rec = logger.records[-1]
+    assert "viya.internal.example.com" not in rec["error"]
+    assert "[viya-host]" in rec["error"]
+
+
+@pytest.mark.asyncio
+async def test_failures_mode_result_is_host_scrubbed():
+    """Full results quote raw VA bodies and carry open_url — the host scrub
+    must cover record['result'], not just error/tool_message."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio", log_results="failures")
+    mw._viya_host = "viya.internal.example.com"
+
+    async def failed(_):
+        return ToolResult(
+            structured_content={
+                "status": "apply_failed",
+                "message": "Viya said: see https://viya.internal.example.com/reports/x",
+                "detail": {"href": "https://viya.internal.example.com/visualAnalytics/y"},
+            }
+        )
+
+    await mw.on_call_tool(_ctx("t", {"goal": "g"}), failed)
+    rec = logger.records[-1]
+    dumped = json.dumps(rec)
+    assert "viya.internal.example.com" not in dumped
+    assert "[viya-host]" in rec["result"]["message"]
+    assert "[viya-host]" in rec["tool_message"]
+
+
+def test_failure_status_heuristic_covers_repo_statuses():
+    from sas_mcp_server.telemetry import _is_tool_failure_status
+
+    failures = [
+        "apply_failed", "export_failed", "invalid_operation", "invalid_request",
+        "unknown_object_type", "unknown_format", "not_found", "not_addable",
+        "missing_identifier", "file_not_found", "table_not_found", "format_not_supported",
+        "table_not_global", "export_too_large", "no_active_session", "error",
+    ]
+    successes = ["created", "applied", "copied", "deleted", "ok", "valid", "promoted", "already_global", "success"]
+    assert all(_is_tool_failure_status(s) for s in failures)
+    assert not any(_is_tool_failure_status(s) for s in successes)
+    assert not _is_tool_failure_status(None)
+
+
+def test_parse_log_results_tristate():
+    from sas_mcp_server.config import parse_log_results
+
+    assert parse_log_results("failures") == "failures"
+    assert parse_log_results("ALWAYS") == "always"
+    assert parse_log_results("true") == "always"
+    assert parse_log_results("false") == "never"
+    assert parse_log_results(None) == "never"
+    assert parse_log_results("banana") == "never"  # warns, degrades safely
+
+
 # --------------------- end-to-end install + on-disk write ------------------- #
 
 
@@ -356,16 +557,17 @@ async def test_install_enabled_end_to_end_writes_jsonl(monkeypatch, tmp_path):
         for x in log_path.read_text(encoding="utf-8").splitlines()
         if x.strip()
     ]
-    assert len(lines) == 1
-    rec = lines[0]
+    assert len(lines) == 2  # session_start header + one call record
+    header, rec = lines
+    assert header["record"] == "session_start"
+    assert header["transport"] == "stdio"
     assert rec["tool"] == "echo"
     assert rec["goal"] == "why echo"
     assert "goal" not in rec["arguments"]
     assert rec["arguments"]["text"] == "hi"
     assert rec["result_logged"] is True
     assert rec["status"] == "success"
-    assert rec["transport"] == "stdio"
-    assert rec["session_id"]
+    assert rec["session_id"] == header["session_id"]
 
 
 def test_install_disabled_log_path_unusable_returns_none(monkeypatch, tmp_path):

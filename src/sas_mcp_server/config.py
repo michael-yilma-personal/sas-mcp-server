@@ -44,13 +44,51 @@ COLLECTION_MAX_LOG_BYTES = int(
 COLLECTION_LOG_BACKUPS = int(os.getenv("COLLECTION_LOG_BACKUPS", "3"))
 # Whether 'goal' is appended to each schema's required[]. Escape hatch = false.
 COLLECTION_REQUIRE_GOAL = env_bool("COLLECTION_REQUIRE_GOAL", True)
-# Privacy dial for tool RESULTS. Default FALSE: results are recorded as a
-# content-free shape summary ({"_type":"array","_items":N} / ...), NOT their
-# contents, so data-sensitive shops contribute usage signal (which tools,
-# goals, inputs, success/failure, error text) WITHOUT exfiltrating table rows
-# or SAS listings. Set true to capture (capped + redacted) result contents.
-# Arguments and goal are captured either way.
-COLLECTION_LOG_RESULTS = env_bool("COLLECTION_LOG_RESULTS", False)
+# Privacy dial for tool RESULTS — tri-state:
+#   never    (default) — results recorded as a content-free shape summary
+#            ({"_type":"object","_keys":[...names]}), NOT their contents, so
+#            data-sensitive shops contribute usage signal without exfiltrating
+#            table rows or SAS listings.
+#   failures — full (capped + redacted) result contents ONLY when the call
+#            errored at the MCP layer or the tool itself declared a failure
+#            (status apply_failed / invalid_* / not_found / ...). Successes
+#            stay shape-only. The middle ground: failure diagnostics are the
+#            highest-value trace data and rarely carry table rows.
+#   always   — full (capped + redacted) result contents on every call.
+# Back-compat: true/1/yes/on -> always; false/0/no/off -> never.
+
+
+def parse_log_results(raw: str | None) -> str:
+    """Map a COLLECTION_LOG_RESULTS value to never | failures | always."""
+    normalized = (raw or "").strip().lower()
+    mapping = {
+        "always": "always",
+        "true": "always",
+        "1": "always",
+        "yes": "always",
+        "on": "always",
+        "failures": "failures",
+        "failure": "failures",
+        "never": "never",
+        "false": "never",
+        "0": "never",
+        "no": "never",
+        "off": "never",
+        "": "never",
+    }
+    mode = mapping.get(normalized)
+    if mode is None:
+        logging.getLogger(__name__).warning(
+            "Unrecognized COLLECTION_LOG_RESULTS=%r; falling back to 'never'.", raw
+        )
+        return "never"
+    return mode
+
+
+COLLECTION_LOG_RESULTS = parse_log_results(os.getenv("COLLECTION_LOG_RESULTS"))
+# Free-text experiment label stamped into each session_start record — tag A/B
+# runs (skill on/off, server build) so traces are self-describing.
+COLLECTION_SESSION_TAG = os.getenv("COLLECTION_SESSION_TAG", "") or None
 
 _logger = logging.getLogger(__name__)
 

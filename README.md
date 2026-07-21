@@ -375,8 +375,13 @@ When enabled it does two things:
 
 1. **Injects a required `goal` parameter** into every tool's schema, asking the model to state in one sentence *why* it chose that tool for the current
    request. The `goal` is stripped from the arguments before the real tool runs, so tools never see it.
-2. **Appends one JSON line per tool call** (JSON Lines / NDJSON) to a local log file: timestamp, session id, tool name, goal, arguments, result, status,
-   error, and latency. Secret-shaped keys and inline Bearer/JWT tokens are redacted and every field is size-capped.
+2. **Appends one JSON line per tool call** (JSON Lines / NDJSON, schema v2) to a local log file: timestamp, session id, per-session sequence number, tool
+   name, goal, arguments (plus a stable `args_hash` for retry analysis), result, status, error, and latency. When a tool *declares* a failure as data
+   (e.g. `{"status": "apply_failed"}`, which the MCP layer sees as success), the record also carries `tool_status` / `is_tool_error` /
+   `tool_message` / `failed_operation_index` — so tool-level failure rates are analyzable in every mode. Each session opens with one
+   `session_start` header record (transport, client name/version, server version, result mode, and an optional `COLLECTION_SESSION_TAG`
+   label for tagging A/B runs). Secret-shaped keys and inline Bearer/JWT tokens are redacted, the Viya hostname is masked in error/result
+   text, and every field is size-capped.
 
 ### Enabling it
 
@@ -386,19 +391,27 @@ Set the toggle in `.env` (all options are documented in `.env.sample`):
 COLLECTION_MODE=true
 # optional overrides (defaults shown):
 # COLLECTION_LOG_PATH=~/.sas-mcp-server/tool-usage.log
-# COLLECTION_LOG_RESULTS=false   # false = record result shape only, not contents
+# COLLECTION_LOG_RESULTS=never   # never | failures | always (see below)
+# COLLECTION_SESSION_TAG=        # free-text label stamped into session_start
 ```
 
-By default (`COLLECTION_LOG_RESULTS=false`) tool **results** are recorded only as a content-free shape summary (e.g. `{"_type":"array","_items":500}`) — arguments, goal, status, and error text are still captured. Set it to `true` to capture (capped + redacted) result contents for richer analysis.
+Tool **results** are recorded per `COLLECTION_LOG_RESULTS` — a tri-state dial: `never` (default) records only a content-free shape summary (type + key
+names, e.g. `{"_type":"object","_keys":["status","report_id"]}`); `failures` records full (capped + redacted) result contents **only** for calls that
+errored or whose tool declared a failure — the recommended middle ground, since failure diagnostics are the highest-value trace data and rarely carry
+table rows; `always` records result contents on every call. Arguments, goal, status, error text, and the tool-declared outcome fields are captured in
+every mode. (`true`/`false` still work as aliases for `always`/`never`.)
 
-> ⚠️ **Privacy:** when enabled, the log captures your tool inputs (e.g. the SAS code and queries you submit) and — if `COLLECTION_LOG_RESULTS=true` — real result data that may include table rows, SAS listings, and PII. Redaction is heuristic (credential-shaped keys + Bearer/JWT only) and does **not** detect PII in data values. **Review the log before sharing it.** The file is locked to your user (chmod 0600 on POSIX; icacls on Windows, best-effort).
+> ⚠️ **Privacy:** when enabled, the log captures your tool inputs (e.g. the SAS code and queries you submit) and — in `failures`/`always` modes — real
+> result data that may include table rows, SAS listings, and PII. Redaction is heuristic (credential-shaped keys + Bearer/JWT + the Viya hostname) and
+> does **not** detect PII in data values. **Review the log before sharing it.** The file is locked to your user (chmod 0600 on POSIX; icacls on
+> Windows, best-effort).
 
 ### Performance impact
 
 Collection mode is designed to be cheap enough to leave on. Measured on this repo (45 registered tools, FastMCP 3.4.2):
 
 - **Prompt tokens.** The injected `goal` field grows the `tools/list` schema the model sees by roughly **+2,400 input tokens (~29%) per turn**. Because the tool list is stable within a session it is served from the prompt cache after the first turn (steady-state ≈ +240 tokens/turn), plus ~15–30 output tokens per call for the model to write the `goal` sentence. This is the only client-visible cost and it applies only while collection mode is enabled. 
-- **Per-call latency.** Middleware + logging adds **≈1.4 ms per call** at the shape-only default (**≈5.3 ms** with `COLLECTION_LOG_RESULTS=true`). The JSONL
+- **Per-call latency.** Middleware + logging adds **≈1.4 ms per call** at the shape-only default (**≈5.3 ms** with `COLLECTION_LOG_RESULTS=always`). The JSONL
   write is offloaded to a worker thread so it never blocks the event loop. Against real Viya calls (typically hundreds of milliseconds to seconds) this is
   negligible — the live integration suite passed identically with collection mode off and on, the overhead lost in normal network variance.
 - **Disk.** Roughly **0.5–0.7 KB per tool call** at the shape-only default. The log rotates at `COLLECTION_MAX_LOG_BYTES` (default 10 MiB, ≈16k calls) and keeps `COLLECTION_LOG_BACKUPS` (default 3) rotated files, so on-disk growth is bounded.
