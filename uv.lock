@@ -1270,7 +1270,7 @@ wheels = [
 
 [[package]]
 name = "sas-mcp-server"
-version = "1.6.0"
+version = "1.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
