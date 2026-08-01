@@ -28,6 +28,73 @@ _CLIENT_TIMEOUT = 300.0
 
 JSONDict = dict[str, Any]
 
+# Cap on how much of a Viya error body is folded into an exception message, so a
+# large or HTML error page can't flood the caller's context.
+_MAX_ERROR_DETAIL = 800
+# How far to follow the nested "errors" chain in a vnd.sas.error+json body.
+_MAX_ERROR_DEPTH = 3
+
+
+def _error_parts(body: JSONDict, depth: int = 0) -> list[str]:
+    """Collect the human-readable fields of one vnd.sas.error+json object."""
+    parts = [str(body[key]) for key in ("message", "remediation") if body.get(key)]
+    details = body.get("details")
+    if isinstance(details, list):
+        parts.extend(str(item) for item in details if item)
+    elif details:
+        parts.append(str(details))
+    if body.get("errorCode"):
+        parts.append(f"(errorCode {body['errorCode']})")
+    # A multi-part failure (e.g. several invalid fields in one request) nests the
+    # actionable text under "errors" while the top-level message stays generic
+    # — "Validation failed" on its own gives the caller nothing to correct.
+    nested = body.get("errors")
+    if isinstance(nested, list) and depth < _MAX_ERROR_DEPTH:
+        for item in nested:
+            if not isinstance(item, dict):
+                continue
+            sub = " ".join(_error_parts(item, depth + 1))
+            if sub:
+                parts.append(f"[{sub}]")
+    return parts
+
+
+def _viya_error_detail(resp: httpx.Response) -> str:
+    """Pull the human-readable parts out of a Viya error response body."""
+    text = getattr(resp, "text", "")
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text.strip()[:_MAX_ERROR_DETAIL]
+    if not isinstance(body, dict):
+        return text.strip()[:_MAX_ERROR_DETAIL]
+    return " ".join(_error_parts(body))[:_MAX_ERROR_DETAIL] or text.strip()[:_MAX_ERROR_DETAIL]
+
+
+def raise_for_viya_status(resp: httpx.Response) -> None:
+    """Raise for a 4xx/5xx, quoting the error message Viya itself returned.
+
+    ``httpx.Response.raise_for_status`` reports only the status code, so the
+    ``application/vnd.sas.error+json`` body — which names the actual problem
+    (e.g. *"The ID specified for use within the URI contains invalid
+    characters."*) — is discarded. A model driving these tools then sees a bare
+    ``Client error '400'`` with nothing to act on and retries the identical
+    call. Appending Viya's ``message``/``details``/``remediation`` gives it
+    something to correct. The exception type is unchanged, so existing
+    ``except httpx.HTTPStatusError`` handlers keep working.
+    """
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _viya_error_detail(resp)
+        if not detail:
+            raise
+        raise httpx.HTTPStatusError(
+            f"{exc}\nViya reported: {detail}", request=exc.request, response=exc.response
+        ) from None
+
 
 async def get_json(
     url: str,
@@ -38,7 +105,7 @@ async def get_json(
     """GET a JSON response from a Viya REST endpoint."""
     full_url = f"{VIYA_ENDPOINT}{url}"
     resp = await client.get(full_url, headers={"Accept": accept}, params=params or {})
-    resp.raise_for_status()
+    raise_for_viya_status(resp)
     return resp.json()
 
 
@@ -77,7 +144,7 @@ async def post_json(
         headers={"Content-Type": "application/json", "Accept": accept},
         params=params or {},
     )
-    resp.raise_for_status()
+    raise_for_viya_status(resp)
     if resp.status_code == 204 or not resp.content:
         return {}
     return resp.json()
@@ -107,7 +174,7 @@ async def put_json(
     headers = {"Content-Type": content_type, "Accept": accept}
     if if_match:
         get_resp = await client.get(full_url)
-        get_resp.raise_for_status()
+        raise_for_viya_status(get_resp)
         headers["If-Match"] = get_resp.headers.get("etag", "")
     resp = await client.put(
         full_url,
@@ -115,7 +182,7 @@ async def put_json(
         headers=headers,
         params=params or {},
     )
-    resp.raise_for_status()
+    raise_for_viya_status(resp)
     if resp.status_code == 204 or not resp.content:
         return {}
     return resp.json()
@@ -125,7 +192,7 @@ async def delete_resource(url: str, client: httpx.AsyncClient) -> None:
     """DELETE a Viya REST resource."""
     full_url = f"{VIYA_ENDPOINT}{url}"
     resp = await client.delete(full_url)
-    resp.raise_for_status()
+    raise_for_viya_status(resp)
 
 
 def make_client(token: str | None) -> httpx.AsyncClient:
