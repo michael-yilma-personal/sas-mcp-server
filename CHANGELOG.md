@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-08-04
+
 ### Added
-- **Configurable server name** — `MCP_SERVER_NAME` sets the name the server advertises to MCP clients (`serverInfo.name`), defaulting to the previous hardcoded `SAS Viya Execution MCP Server`. Clients such as VS Code label servers with this value rather than the key in their own configuration, so operators running one server per Viya environment can now tell them apart. Applied to both the HTTP (`mcp_server.py`) and stdio (`stdio_server.py`) entry points, and read in `config.py` following the existing `COMPUTE_CONTEXT_NAME` pattern.
+- **Configurable server name** (#35) — `MCP_SERVER_NAME` sets the name the server advertises to MCP clients (`serverInfo.name`), defaulting to the previous hardcoded `SAS Viya Execution MCP Server`. Clients such as VS Code label servers with this value rather than the key in their own configuration, so operators running one server per Viya environment can now tell them apart. Applied to both the HTTP (`mcp_server.py`) and stdio (`stdio_server.py`) entry points, and read in `config.py` following the existing `COMPUTE_CONTEXT_NAME` pattern. Documented in `.env.sample` and the environment-variables table in `examples/configuration.md`.
+
+### Fixed
+- **`.env.sample` no longer leaks a comment into `MCP_SIGNING_KEY`** (#32) — the production-key note sat as an inline comment on the assignment, and docker/podman `--env-file` treats everything after `=` as the literal value, so the key would have included the comment text. The note now lives on its own line above the assignment, and the file's missing trailing newline is restored. Values stay deliberately unquoted for the same `--env-file` reason: quotes are kept verbatim in the value.
 
 ## [1.6.1] - 2026-08-01
 
