@@ -10,6 +10,14 @@
 - **Tolerant coercion for list/dict tool parameters** — some MCP clients serialize optional list/dict parameters as JSON-encoded strings (`'[{"addData": ...}]'` instead of the array), which pydantic rejected before the tool body ran, and which the model could not correct from its side. `tools/_common.py` now absorbs the whole failure class server-side via `BeforeValidator` coercions, leaving the published JSON schema unchanged. Applied to the report-authoring and decisioning list parameters.
 - **`get_castable_columns` returns a structured `not_found`** — a missing CAS table now explains the two usual causes (an unloaded source table vs a session-scoped table created without `PROMOTE=YES`) instead of surfacing a raw HTTP 404.
 
+## [1.6.2] - 2026-08-04
+
+### Added
+- **Configurable server name** (#35) — `MCP_SERVER_NAME` sets the name the server advertises to MCP clients (`serverInfo.name`), defaulting to the previous hardcoded `SAS Viya Execution MCP Server`. Clients such as VS Code label servers with this value rather than the key in their own configuration, so operators running one server per Viya environment can now tell them apart. Applied to both the HTTP (`mcp_server.py`) and stdio (`stdio_server.py`) entry points, and read in `config.py` following the existing `COMPUTE_CONTEXT_NAME` pattern. Documented in `.env.sample` and the environment-variables table in `examples/configuration.md`.
+
+### Fixed
+- **`.env.sample` no longer leaks a comment into `MCP_SIGNING_KEY`** (#32) — the production-key note sat as an inline comment on the assignment, and docker/podman `--env-file` treats everything after `=` as the literal value, so the key would have included the comment text. The note now lives on its own line above the assignment, and the file's missing trailing newline is restored. Values stay deliberately unquoted for the same `--env-file` reason: quotes are kept verbatim in the value.
+
 ## [1.6.1] - 2026-08-01
 
 ### Fixed
