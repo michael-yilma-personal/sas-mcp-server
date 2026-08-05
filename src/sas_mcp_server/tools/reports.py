@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP
 from pydantic import BeforeValidator
 
-from ..helpers import report_authoring_helpers, report_export_helpers
+from ..helpers import report_authoring_helpers, report_authoring_registry, report_export_helpers
 from ..viya_client import contains_filter, get_json, get_paged_items, logger, return_items
 from ._common import coerce_json_dict, coerce_json_list, coerce_str_or_json_list, make_session_helpers
 
@@ -273,10 +273,10 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
             result_name_conflict: Save-as name-conflict policy — ``rename``
                 (default), ``abort``, or ``replace``.
         """
-        if result_name_conflict not in report_authoring_helpers.CONFLICT_VALUES:
+        if result_name_conflict not in report_authoring_registry.CONFLICT_VALUES:
             return {
                 "status": "invalid_request",
-                "message": f"result_name_conflict must be one of {sorted(report_authoring_helpers.CONFLICT_VALUES)}.",
+                "message": f"result_name_conflict must be one of {sorted(report_authoring_registry.CONFLICT_VALUES)}.",
             }
         for param_name, value in (("result_report_name", result_report_name), ("result_folder", result_folder)):
             # A blank save-as target would silently fall back to editing the

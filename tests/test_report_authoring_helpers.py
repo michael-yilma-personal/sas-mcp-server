@@ -9,10 +9,6 @@ shaping that back the create_report / apply_report_operations tools.
 """
 
 from sas_mcp_server.helpers.report_authoring_helpers import (
-    AGGREGATIONS,
-    NOT_ADDABLE,
-    OPERATION_KEYS,
-    REPORT_OBJECT_TYPES,
     CreateReportRequest,
     build_copy_body,
     build_create_body,
@@ -25,6 +21,12 @@ from sas_mcp_server.helpers.report_authoring_helpers import (
     validate_create,
     validate_operations,
     warn_operations,
+)
+from sas_mcp_server.helpers.report_authoring_registry import (
+    AGGREGATIONS,
+    NOT_ADDABLE,
+    OPERATION_KEYS,
+    REPORT_OBJECT_TYPES,
 )
 
 
