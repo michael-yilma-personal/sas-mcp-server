@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- **Visual Analytics report-authoring tools (6)** — author VA reports through the API rather than only reading and exporting them: `create_report` (create, optionally building the whole report in one atomic call via an `operations` array), `apply_report_operations` (the workhorse — apply an ordered, atomic batch of native VA operations: `addData`, `addPage`, `addObject`, `updateObject`, `setParameterValue`, `updateData`, `changeData`, `applyDataView`, with placement via `page`/`relativeToObject`/`container`/`report`, `dry_run`, the ETag concurrency handshake, and save-as via `result_report_name`/`result_folder`), `describe_report_objects` (the self-describing catalog the authoring loop reads — every operation and addable object with data roles, options, an intent→object map, placement guide, and hard limits), `get_report_outline` (read structure back, returning the object handles the other tools need), `copy_report`, and `delete_report`. Validation, the operation/object catalog, and payload construction live in `helpers/report_authoring_helpers.py` so the tools stay thin wrappers. Brings the tool count to 74.
+- **`build_va_dashboard` prompt** — guides a polished multi-page dashboard build from a CAS table as a discover → shape → structure → polish → verify method over the report-authoring tools.
+
+### Fixed
+- **Tolerant coercion for list/dict tool parameters** — some MCP clients serialize optional list/dict parameters as JSON-encoded strings (`'[{"addData": ...}]'` instead of the array), which pydantic rejected before the tool body ran, and which the model could not correct from its side. `tools/_common.py` now absorbs the whole failure class server-side via `BeforeValidator` coercions, leaving the published JSON schema unchanged. Applied to the report-authoring and decisioning list parameters.
+- **`get_castable_columns` returns a structured `not_found`** — a missing CAS table now explains the two usual causes (an unloaded source table vs a session-scoped table created without `PROMOTE=YES`) instead of surfacing a raw HTTP 404.
+
 ## [1.6.2] - 2026-08-04
 
 ### Added
