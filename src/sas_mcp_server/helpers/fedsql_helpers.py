@@ -42,6 +42,14 @@ from typing import Any
 # SELECTs and returns rows, so anything that writes is refused up front (the
 # real boundary is the write classification in tools/_access.py — this is the
 # helpful error, not the security control).
+# NOTE (live-verified): PROC FEDSQL does NOT honour a libref's
+# ``access=readonly``. A DATA step writing to such a libref is denied ("Write
+# access to member ... is denied"), but FedSQL's BASE driver talks to the
+# underlying directory and happily runs CREATE TABLE, UPDATE, DELETE and DROP
+# against it. So there is no library-level backstop behind this screen: on the
+# compute tier the screen is the *only* thing standing between a submitted
+# statement and a write. (CAS is different — caslib access is enforced by Viya
+# authorisation against the caller's identity, which FedSQL cannot bypass.)
 _LEADING_SELECT = re.compile(r"^\s*(?:select|\(\s*select)\b", re.IGNORECASE)
 # Line (--) and block (/* */) comments, and quoted strings, stripped before the
 # structural checks so a ';' inside a comment or literal doesn't false-trigger.
