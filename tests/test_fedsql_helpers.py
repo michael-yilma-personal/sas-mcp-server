@@ -20,6 +20,7 @@ from sas_mcp_server.helpers.fedsql_helpers import (
     map_error,
     screen_query,
 )
+from sas_mcp_server.helpers.fedsql_registry import MAX_LIMIT, RESERVED_WORDS, WRITE_VERBS
 
 # --- screening: accepted ------------------------------------------------------
 
@@ -120,7 +121,7 @@ def test_screen_blocks_macro_triggers(query):
     assert "macro" in result["message"].lower()
 
 
-@pytest.mark.parametrize(("limit", "start"), [(0, 0), (-1, 0), (10_001, 0), (10, -1)])
+@pytest.mark.parametrize(("limit", "start"), [(0, 0), (-1, 0), (MAX_LIMIT + 1, 0), (10, -1)])
 def test_screen_rejects_out_of_range_paging(limit, start):
     assert screen_query("select 1 from t", limit, start)["status"] == "invalid_query"
 
@@ -129,6 +130,22 @@ def test_screen_rejects_out_of_range_paging(limit, start):
 def test_screen_requires_integer_limit(limit):
     """limit is the server-side row cap, so a non-integer must never reach the SQL."""
     assert screen_query("select 1 from t", limit, 0)["status"] == "invalid_query"
+
+
+# --- registry integrity ------------------------------------------------------
+
+
+def test_every_write_verb_is_refused():
+    """The refusal list is config: each verb in it must actually be rejected."""
+    for verb in WRITE_VERBS:
+        result = screen_query(f"select 1 from t union all {verb} something", 10, 0)
+        assert result is not None, verb
+        assert verb.upper() in result["message"], verb
+
+
+def test_reserved_words_are_lowercase_for_lookup():
+    """_syntax_hint lowercases the token before the membership test."""
+    assert all(w == w.lower() for w in RESERVED_WORDS)
 
 
 # --- generated code -----------------------------------------------------------
