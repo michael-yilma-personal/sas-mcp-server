@@ -103,6 +103,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # Tier 1
         "catalog_run_agent",  # spawns a run, leaves history
         "catalog_run_adhoc_analysis",  # spawns a profiling job
+        "query_data",  # runs caller-submitted FedSQL in compute — code execution, not a pure read
         # Tier 2
         "upload_data",
         "upload_inline_data",

@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for executing SAS code, training AutoML pr
 
 ## Features
 
-- 74 tools across 9 selectable tiers, spanning the Analytics Life Cycle on SAS Viya
+- 75 tools across 9 selectable tiers, spanning the Analytics Life Cycle on SAS Viya
 - Prompt Templates for improving your SAS Code
 - OAuth2 authentication with PKCE flow
 - HTTP-based MCP server compatible with MCP clients
@@ -160,7 +160,7 @@ MCP_TIERS=0-3 uv run app
 
 ### Read-only mode
 
-Set `MCP_READ_ONLY=true` to expose only tools that neither change server-side state nor cause server-side work — 43 of the 74 tools. Withheld tools are never registered, so they are absent from the client's tool list entirely: the model cannot see them, so it cannot attempt them.
+Set `MCP_READ_ONLY=true` to expose only tools that neither change server-side state nor cause server-side work — 43 of the 75 tools. Withheld tools are never registered, so they are absent from the client's tool list entirely: the model cannot see them, so it cannot attempt them.
 
 This is a filter over the tiers, not a tier of its own — the read/write split cuts across every tier (Tier 3 has both `get_report` and `delete_report`). The two settings compose:
 
@@ -212,6 +212,7 @@ The headings below match the numbered **tiers** above, so `MCP_TIERS` maps direc
 - **get_castable_info**: Get table metadata (row count, columns, size)
 - **get_castable_columns**: Get column names, types, labels, formats
 - **get_castable_data**: Fetch sample rows from a CAS table
+- **query_data**: Run a FedSQL `SELECT` against CAS or compute data and get the rows back — one SQL surface over both storage tiers. Pick the tier with `target` (`cas` for `caslib.table`, `compute` for `libref.table`); joins, subqueries, aggregation, and `UNION` all work, and the row cap is applied server-side by the tool (a `LIMIT` you write is ignored, since a malformed one is silently discarded by CAS). Optionally returns the query as `CREATE VIEW` text for you to run yourself. Reads only: writes are refused pre-flight, and SAS macro triggers (`%`/`&`) are rejected because the macro processor would expand them outside SQL. Note the two tiers cannot be joined in one statement.
 
 *Compute libraries (SAS/Compute, within a compute context):*
 - **list_compute_libraries**: List the SAS libraries (librefs) assigned in a compute context
@@ -475,7 +476,7 @@ tsv, and `file_path`/`data_format` coverage needs no extra deps. Generating a
 `sas7bdat`/`sashdat` fixture requires SAS itself, so those two formats are covered by
 unit-level payload tests only, not live.
 
-Every one of the 74 tools and 9 prompt templates has an integration test, enforced by the
+Every one of the 75 tools and 9 prompt templates has an integration test, enforced by the
 `test_every_tool_has_integration_coverage` / `test_every_prompt_has_integration_coverage`
 guards — adding a new tool or prompt without integration coverage fails the suite. The
 resource-dependent tests discover real targets on the instance: `score_data` scores the most
@@ -511,7 +512,7 @@ gh gist create reports/integration.xml                          # full XML as a 
 
 | File | Description |
 |---|---|
-| `tests/test_tool_payloads.py` | Payload assertions for all 74 tools (URL paths, JSON body, query params, headers) plus error-path coverage |
+| `tests/test_tool_payloads.py` | Payload assertions for all 75 tools (URL paths, JSON body, query params, headers) plus error-path coverage |
 | `tests/test_integration.py` | End-to-end workflow tests against a real Viya instance |
 | `tests/test_tools.py` | Unit tests for the generic Viya REST helpers in `viya_client` (`get_json`, `post_json`, `make_client`, …) |
 | `tests/test_viya_utils.py` | Unit tests for Viya compute session and job orchestration |
