@@ -1758,6 +1758,25 @@ async def test_fedsql_query_workflow(integration_mcp_server):
         ).data
         assert macro["status"] == "invalid_query"
 
+        # An unterminated literal must never be submitted: SAS would keep
+        # consuming, hanging this compute session for every later call.
+        unbalanced = (
+            await client.call_tool(
+                "query_data", {"query": "select LOAN from Public.HMEQ where JOB = 'Sales"}
+            )
+        ).data
+        assert unbalanced["status"] == "invalid_query"
+        assert "unbalanced quote" in unbalanced["message"]
+
+        # A correctly escaped literal (doubled quote) is just a value.
+        escaped = (
+            await client.call_tool(
+                "query_data",
+                {"query": "select JOB from Public.HMEQ where JOB = 'x'' or ''1''=''1'", "limit": 3},
+            )
+        ).data
+        assert escaped["count"] == 0
+
         # A failed query must not poison the session for the next one.
         recovered = (
             await client.call_tool("query_data", {"query": "select LOAN from Public.HMEQ", "limit": 2})

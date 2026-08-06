@@ -75,6 +75,37 @@ def test_screen_rejects(query, fragment):
 @pytest.mark.parametrize(
     "query",
     [
+        "select a from t where id = 'abc",
+        'select a from t where id = "abc',
+        "select a from t where id = 'it''s",
+        "select 'a' , 'b from t",
+    ],
+)
+def test_screen_rejects_unbalanced_quotes(query):
+    """An unterminated literal HANGS the compute session (SAS keeps looking for
+    the closing quote), wedging it for every later call — so it must never be
+    submitted."""
+    result = screen_query(query, 10, 0)
+    assert result is not None
+    assert "unbalanced quote" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "select a from t where name = 'O''Brien'",
+        "select a from t where id = 'U1001'' or ''1''=''1'",
+        "select \"odd name\" from t where x = 'a'",
+    ],
+)
+def test_screen_accepts_correctly_escaped_literals(query):
+    """Doubled quotes are the SQL escape — a tautology payload is just a value."""
+    assert screen_query(query, 10, 0) is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         'select a from t where u = "&sysuserid"',  # resolves inside double quotes
         "select a from t where x = %sysfunc(getoption(work))",
         "select &col from t",

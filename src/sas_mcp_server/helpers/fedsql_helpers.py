@@ -116,7 +116,21 @@ def screen_query(query: str, limit: int, start: int) -> dict[str, Any] | None:
     if not isinstance(start, int) or isinstance(start, bool) or start < 0:
         return _invalid(f"start must be a non-negative integer (got {start!r}).")
 
-    # Macro scan first: it is the only check guarding a channel *outside* SQL,
+    # Quote balance first — every later mask depends on quoting being sane, and
+    # an unterminated literal is the one input that HANGS rather than fails: SAS
+    # keeps consuming, looking for the closing quote, so the job never returns
+    # and the warm compute session is wedged for every later call (including
+    # execute_sas_code). Verified live.
+    structural = _COMMENTS_AND_STRINGS.sub(lambda m: " " * len(m.group()), query)
+    if "'" in structural or '"' in structural:
+        return _invalid(
+            "unbalanced quote — every string literal and quoted identifier must "
+            "be closed. An unterminated quote would hang the compute session "
+            "rather than fail. Escape a quote inside a literal by doubling it: "
+            "'O''Brien'."
+        )
+
+    # Macro scan next: it is the only check guarding a channel *outside* SQL,
     # so its message must not be pre-empted by a syntax complaint.
     macro_masked = _COMMENTS_AND_SQ_STRINGS.sub(lambda m: " " * len(m.group()), query)
     if _MACRO_TRIGGER.search(macro_masked):
@@ -127,9 +141,9 @@ def screen_query(query: str, limit: int, start: int) -> dict[str, Any] | None:
             "leaves alone."
         )
 
-    # Structural checks run against a copy with comments and string/quoted
-    # identifier contents blanked, so their contents can't trip the rules.
-    masked = _COMMENTS_AND_STRINGS.sub(lambda m: " " * len(m.group()), query)
+    # Remaining structural checks run against the same masked copy, so a ';' or
+    # a paren inside a literal or comment can't trip them.
+    masked = structural
     if masked.count("/*") != masked.count("*/"):
         return _invalid(
             "unterminated block comment — an open /* would swallow the rest of "
