@@ -358,10 +358,13 @@ _ERROR_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         re.compile(r"BASE driver, schema name (\w+) was not found", re.I),
         "schema_not_found",
-        "Schema/libref '{0}' is not visible to this query. Caslibs are only "
-        "reachable with target='cas' and librefs only with target='compute' — and "
-        "the two cannot be joined in one statement. SASHELP is not visible to "
-        "FedSQL; copy the table to WORK first.",
+        "Libref '{0}' is not visible to FedSQL. Two causes: (1) wrong tier — "
+        "caslibs are reachable only with target='cas' and librefs only with "
+        "target='compute', and the two cannot be joined in one statement; "
+        "(2) it is a CONCATENATED libref (several directories under one name, "
+        "as SASHELP and MAPS are). FedSQL's BASE driver maps one schema to one "
+        "directory, so it skips concatenated librefs entirely — copy the table "
+        "into WORK first (data work.t; set sashelp.cars; run;) and query WORK.",
     ),
     (
         re.compile(r"The caslib (\w+) does not exist", re.I),

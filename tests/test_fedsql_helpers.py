@@ -222,6 +222,11 @@ def test_map_error_returns_none_without_errors():
     [
         ('ERROR: Table "PUBLIC.NOPE" does not exist or cannot be accessed', "table_not_found", "PUBLIC.NOPE"),
         ("ERROR: BASE driver, schema name PCAS was not found", "schema_not_found", "PCAS"),
+        (
+            "ERROR: BASE driver, schema name SASHELP was not found",
+            "schema_not_found",
+            "CONCATENATED",
+        ),
         ("ERROR: The caslib NopeLib does not exist", "schema_not_found", "NopeLib"),
         ('ERROR: Column "X" not found or cannot be accessed', "column_not_found", "X"),
         ('ERROR: Column reference "id" is ambiguous', "ambiguous_column", "alias"),

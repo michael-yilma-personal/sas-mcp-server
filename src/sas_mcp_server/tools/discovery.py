@@ -839,8 +839,11 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
         * ``target='cas'`` (default) — qualify as ``caslib.table``
           (e.g. ``Public.HMEQ``); see list_caslibs / list_castables.
         * ``target='compute'`` — qualify as ``libref.table`` (e.g. ``WORK.SALES``);
-          see list_compute_libraries / list_compute_tables. SASHELP is not
-          visible to FedSQL — copy such a table to WORK first.
+          see list_compute_libraries / list_compute_tables. **Concatenated
+          librefs — several directories under one name, which is what SASHELP
+          and MAPS are — are invisible to FedSQL**, because its BASE driver maps
+          one schema to one directory. Copy such a table into WORK first
+          (``data work.cars; set sashelp.cars; run;``) and query ``WORK.CARS``.
 
         **Dialect notes** (FedSQL, not PROC SQL): joins (inner/left/right/full/
         cross), subqueries, UNION, GROUP BY/HAVING/ORDER BY, and scalar functions
