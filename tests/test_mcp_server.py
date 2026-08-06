@@ -185,8 +185,11 @@ async def test_http_raw_bearer_accepted_end_to_end():
     verifier = AsyncMock(
         return_value=AccessToken(token="RAWJWT", client_id="test", scopes=["openid"], expires_at=None)
     )
+    # Patch the provider instance wired into the app (mcp_server.viya_auth) —
+    # test_config.py reloads sas_mcp_server.config, rebinding config.viya_auth
+    # to a fresh object the app never sees.
     with patch.object(config, "ALLOW_RAW_BEARER", True), \
-         patch.object(config.viya_auth, "_token_validator") as validator:
+         patch.object(mcp_server.viya_auth, "_token_validator") as validator:
         validator.verify_token = verifier
         resp = await _post_initialize("RAWJWT")
     assert resp.status_code == 200
@@ -200,7 +203,7 @@ async def test_http_raw_bearer_rejected_when_disabled():
         return_value=AccessToken(token="RAWJWT", client_id="test", scopes=["openid"], expires_at=None)
     )
     with patch.object(config, "ALLOW_RAW_BEARER", False), \
-         patch.object(config.viya_auth, "_token_validator") as validator:
+         patch.object(mcp_server.viya_auth, "_token_validator") as validator:
         validator.verify_token = verifier
         resp = await _post_initialize("RAWJWT")
     assert resp.status_code == 401
