@@ -446,6 +446,80 @@ async def test_upload_file_request(mcp_server_with_mock_client):
     assert kwargs["headers"]["Accept"] == "application/json"
 
 
+async def test_upload_file_into_folder_from_file_path(mcp_server_with_mock_client, tmp_path):
+    """file_path: binary bytes are read server-side and filed under parentFolderUri."""
+    mcp, mock_client = mcp_server_with_mock_client
+    blob = tmp_path / "book.xlsx"
+    payload = b"PK\x03\x04binary-workbook-bytes"
+    blob.write_bytes(payload)
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "upload_file",
+            {
+                "file_name": "book.xlsx",
+                "file_path": str(blob),
+                "parent_folder_uri": "/folders/folders/f-123",
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        )
+
+    url = mock_client.post.call_args[0][0]
+    assert url.endswith("/files/files")
+    kwargs = mock_client.post.call_args[1]
+    assert kwargs["params"] == {"parentFolderUri": "/folders/folders/f-123"}
+    assert kwargs["content"] == payload
+    assert kwargs["headers"]["Content-Type"].startswith("application/vnd.openxmlformats")
+    assert 'filename="book.xlsx"' in kwargs["headers"]["Content-Disposition"]
+
+
+async def test_upload_file_unknown_extension_defaults_to_octet_stream(
+    mcp_server_with_mock_client, tmp_path
+):
+    """Without content_type, an unguessable extension falls back to octet-stream."""
+    mcp, mock_client = mcp_server_with_mock_client
+    blob = tmp_path / "payload.viyabin"
+    blob.write_bytes(b"\x00\x01\x02")
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "upload_file", {"file_name": "payload.viyabin", "file_path": str(blob)}
+        )
+
+    kwargs = mock_client.post.call_args[1]
+    assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
+    assert kwargs["params"] is None
+
+
+async def test_upload_file_requires_exactly_one_source(mcp_server_with_mock_client):
+    """Zero or multiple content sources is rejected before any Viya call."""
+    mcp, mock_client = mcp_server_with_mock_client
+    async with Client(mcp) as client:
+        none = await client.call_tool("upload_file", {"file_name": "x.txt"})
+        both = await client.call_tool(
+            "upload_file",
+            {"file_name": "x.txt", "content": "hi", "file_path": "/tmp/x.txt"},
+        )
+    assert none.data["status"] == "invalid_source"
+    assert both.data["status"] == "invalid_source"
+    assert set(both.data["provided"]) == {"content", "file_path"}
+    mock_client.post.assert_not_called()
+
+
+async def test_upload_file_local_read_respects_gate(
+    mcp_server_with_mock_client, tmp_path, monkeypatch
+):
+    """ALLOW_LOCAL_FILE_UPLOAD=false blocks server-side reads for upload_file too."""
+    mcp, mock_client = mcp_server_with_mock_client
+    blob = tmp_path / "x.txt"
+    blob.write_text("hello")
+    monkeypatch.setenv("ALLOW_LOCAL_FILE_UPLOAD", "false")
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "upload_file", {"file_name": "x.txt", "file_path": str(blob)}
+        )
+    assert result.data["status"] == "file_upload_disabled"
+    mock_client.post.assert_not_called()
+
+
 async def test_download_file_request(mcp_server_with_mock_client):
     mcp, mock_client = mcp_server_with_mock_client
     mock_client.get.return_value.text = "file content here"
@@ -2173,6 +2247,36 @@ async def test_execute_sas_code_request(mcp_server_with_mock_client):
             "log": "LOG",
             "listing": "LISTING",
         }
+
+
+async def test_execute_sas_code_fresh_session_resets_first(mcp_server_with_mock_client):
+    """fresh_session=True discards the cached compute session before running."""
+    mcp, _ = mcp_server_with_mock_client
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value="CLIENT")
+    cm.__aexit__ = AsyncMock(return_value=False)
+    with patch("sas_mcp_server.tools.compute.run_one_snippet") as mock_run, \
+         patch("sas_mcp_server.tools.compute.reset_cached_session", new_callable=AsyncMock) as mock_reset, \
+         patch("sas_mcp_server.tools.compute.make_client", return_value=cm):
+        mock_run.return_value = {"snippet_id": "1", "state": "completed", "log": "", "listing": ""}
+        async with Client(mcp) as client:
+            await client.call_tool(
+                "execute_sas_code", {"sas_code": "data _null_; run;", "fresh_session": True}
+            )
+        mock_reset.assert_awaited_once()
+        assert mock_reset.await_args[0][0] == "CLIENT"
+        mock_run.assert_called_once_with("data _null_; run;", "1", "test-token")
+
+
+async def test_execute_sas_code_default_keeps_session(mcp_server_with_mock_client):
+    """Without fresh_session, the cached session is reused untouched."""
+    mcp, _ = mcp_server_with_mock_client
+    with patch("sas_mcp_server.tools.compute.run_one_snippet") as mock_run, \
+         patch("sas_mcp_server.tools.compute.reset_cached_session", new_callable=AsyncMock) as mock_reset:
+        mock_run.return_value = {"snippet_id": "1", "state": "completed", "log": "", "listing": ""}
+        async with Client(mcp) as client:
+            await client.call_tool("execute_sas_code", {"sas_code": "data _null_; run;"})
+        mock_reset.assert_not_awaited()
 
 
 # -----------------------------------------------------------------------
