@@ -328,7 +328,10 @@ register_prompts(mcp)
 
 def main() -> None:
     """Run the MCP server in stdio mode."""
-    mcp.run(transport="stdio")
+    # No startup banner: FastMCP prints it to stderr, and a programmatic driver
+    # that doesn't drain stderr deadlocks on the filled pipe before the first
+    # MCP message. Diagnostics still log normally.
+    mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
