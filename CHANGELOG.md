@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- **`upload_file` can now stage binary files into Content folders** — the file content can be provided through exactly one of `content` (inline text, the original behaviour), `file_path` (the server reads the bytes off its own disk — binary-safe, gated by `ALLOW_LOCAL_FILE_UPLOAD`, mirroring `upload_data`), or `url` (server-side fetch). A new `parent_folder_uri` argument files the upload into a Content folder (`/folders/folders/{id}`) — the location `%include`/`filesrvc` ingestion needs — instead of landing unfiled. `content_type` now defaults per source: `text/plain` for inline content, else guessed from the file name (`application/octet-stream` fallback). Field feedback: staging a multi-sheet Excel workbook for filesrvc ingestion previously required going around the server to the raw Files REST API.
+- **`execute_sas_code` `fresh_session` flag** — `fresh_session=true` discards the cached compute session before running, so the code starts with no inherited SAS state (equivalent to calling `reset_compute_session` first). The docstring now flags the state-persistence gotcha prominently — a warm session surviving between calls can make re-run checks double-count — and recommends `libname casuser cas;` over log-flooding `caslib _all_ assign;` preambles.
+
+### Fixed
+- **`execute_sas_code` returns the whole log and listing** — the compute log/listing endpoints are paged collections, and a single unpaginated GET silently truncated long logs to the first page (~a few KB), cutting exactly the trailing PASS/ERROR lines audit-style callers read. Both are now fetched page by page to the end; a defensive 10-million-line backstop appends an explicit `[output truncated after N lines]` marker instead of cutting silently. Field feedback: the log is the deliverable for verification workflows, and the truncation forced a `proc printto` → filesrvc → REST-download workaround.
+- **stdio mode no longer prints the FastMCP startup banner** — the banner went to stderr, and a programmatic client that doesn't drain stderr deadlocked on the filled pipe before the first MCP message. `show_banner=False`; diagnostics still log normally.
+
+### Changed
+- **fastmcp lock bumped 3.4.2 → 3.4.6** — picks up upstream security hardening (OAuth redirect-scheme and DCR redirect-URI validation, SSRF bypass blocks, streamable-HTTP DNS-rebinding protection with the host-guard defaults relaxed again in 3.4.4 for reverse-proxy/ASGI deployments) and a JWKS fix (a single unsupported key type no longer rejects every token). The `>=3.0.0,<4.0.0` range is unchanged.
+
+### Tests
+- **The real-HTTP auth stack is now exercised un-mocked** — new regression tests drive the exact ASGI app uvicorn serves via in-process HTTP: a raw upstream JWT with `ALLOW_RAW_BEARER=true` passes the full starlette `AuthenticationMiddleware` → `BearerAuthBackend` → `PermissiveOAuthProxy` chain end to end (verified live against Viya during diagnosis), is refused when the flag is off, and a missing bearer is a 401. Previously every HTTP-auth test mocked `load_access_token`, so this layer had no non-mocked coverage — the gap behind a field report that the raw-bearer HTTP path was dead.
+
 ## [1.7.0] - 2026-08-06
 
 ### Added

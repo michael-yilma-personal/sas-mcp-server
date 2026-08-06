@@ -189,6 +189,40 @@ async def test_wait_job_error_state(
 
 
 @pytest.mark.asyncio
+async def test_wait_job_fetches_all_log_pages(mock_httpx_client, mock_env_vars):
+    """A log longer than one page is returned completely.
+
+    Regression: the log/listing endpoints are paged collections, and a single
+    unpaginated GET silently truncated long logs to the first page — cutting
+    exactly the trailing PASS/ERROR lines audit-style callers need.
+    """
+    mock_state = AsyncMock()
+    mock_state.text = "completed"
+
+    full_page = AsyncMock()
+    full_page.json = MagicMock(
+        return_value={"items": [{"line": f"NOTE: line {i}"} for i in range(1000)]}
+    )
+    tail_page = AsyncMock()
+    tail_page.json = MagicMock(return_value={"items": [{"line": "NOTE: the PASS line"}]})
+    empty_listing = AsyncMock()
+    empty_listing.json = MagicMock(return_value={"items": []})
+
+    mock_httpx_client.get.side_effect = [mock_state, full_page, tail_page, empty_listing]
+
+    state, log, listing = await wait_job(mock_httpx_client, "s", "j", poll=0.01)
+
+    assert state == "completed"
+    lines = log.split("\n")
+    assert len(lines) == 1001
+    assert lines[0] == "NOTE: line 0"
+    assert lines[-1] == "NOTE: the PASS line"
+    log_calls = [c for c in mock_httpx_client.get.call_args_list if c[0][0].endswith("/log")]
+    assert log_calls[0][1]["params"] == {"start": 0, "limit": 1000}
+    assert log_calls[1][1]["params"] == {"start": 1000, "limit": 1000}
+
+
+@pytest.mark.asyncio
 async def test_run_one_snippet_success(
     sample_sas_code, mock_access_token, mock_env_vars
 ):

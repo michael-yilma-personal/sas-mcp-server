@@ -242,6 +242,33 @@ async def submit_job(client: httpx.AsyncClient, session_id: str, code: str) -> s
     return job["id"]
 
 
+# Page size for compute log/listing collection fetches, and a loop backstop far
+# above any real log (10k pages x 1000 lines). Hitting the backstop appends an
+# explicit truncation marker rather than cutting silently.
+_LINES_PAGE_LIMIT = 1000
+_LINES_MAX_PAGES = 10_000
+
+
+async def _fetch_all_lines(client: httpx.AsyncClient, url: str) -> list[str]:
+    """Collect every ``line`` of a compute log/listing collection.
+
+    The log and listing endpoints return *paged* collections (default page ~10
+    lines), so a single unpaginated GET silently truncates anything longer —
+    for audit-style work the log IS the deliverable, so every page is fetched.
+    """
+    lines: list[str] = []
+    start = 0
+    for _ in range(_LINES_MAX_PAGES):
+        resp = await client.get(url, params={"start": start, "limit": _LINES_PAGE_LIMIT})
+        items = resp.json().get("items", [])
+        lines.extend(item.get("line", "") for item in items)
+        if len(items) < _LINES_PAGE_LIMIT:
+            return lines
+        start += _LINES_PAGE_LIMIT
+    lines.append(f"[output truncated after {len(lines)} lines]")
+    return lines
+
+
 async def wait_job(
     client: httpx.AsyncClient, session_id: str, job_id: str, poll: float = 2
 ) -> tuple[str, str, str]:
@@ -251,20 +278,13 @@ async def wait_job(
         resp = await client.get(state_url)
         state = resp.text.strip()
         if state in ("completed", "error", "warning", "canceled"):
-            # Fetch log
             log_url = f"{VIYA_ENDPOINT}/compute/sessions/{session_id}/jobs/{job_id}/log"
-            log_resp = await client.get(log_url)
-            log = log_resp.json()
-            lines = [item["line"] for item in log.get("items", [])]
-            log_text = "\n".join(lines)
+            log_text = "\n".join(await _fetch_all_lines(client, log_url))
 
-            # Fetch listing (plain text output)
             listing_url = (
                 f"{VIYA_ENDPOINT}/compute/sessions/{session_id}/jobs/{job_id}/listing"
             )
-            listing_resp = await client.get(listing_url)
-            listing_json = listing_resp.json()
-            listing_lines = [item["line"] for item in listing_json.get("items", [])]
+            listing_lines = await _fetch_all_lines(client, listing_url)
             listing_text = (
                 "\n".join(listing_lines) if listing_lines else "(no listing output)"
             )

@@ -20,18 +20,30 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
     viya_session, _ = make_session_helpers(get_token)
 
     @mcp.tool()
-    async def execute_sas_code(sas_code: str, ctx: Context) -> dict[str, str]:
+    async def execute_sas_code(
+        sas_code: str, ctx: Context, fresh_session: bool = False
+    ) -> dict[str, str]:
         """
         Executes the provided SAS code in the Viya environment and returns information about the completed Job.
         This will create a job definition for the SAS code, execute it, and then retrieve the results.
 
-        The code runs in a reusable compute session that is kept warm and shared
-        across calls (per user), so SAS state — WORK tables, macro variables, and
-        assigned librefs — persists between successive ``execute_sas_code`` calls.
-        Call ``reset_compute_session`` to discard that state and start fresh.
+        IMPORTANT — state persists between calls: the code runs in a reusable
+        compute session that is kept warm and shared across calls (per user),
+        so SAS state — WORK tables, macro variables, and assigned librefs —
+        survives between successive ``execute_sas_code`` calls. A re-run can
+        therefore see leftovers from earlier calls (e.g. a check that counts
+        results twice). Pass ``fresh_session=True`` (or call
+        ``reset_compute_session``) when the code must start from a clean slate.
+
+        Tip: to reach CAS data, prefer ``libname casuser cas;`` (or a targeted
+        ``caslib`` statement) over ``caslib _all_ assign;`` — on tenants with
+        many caslibs the latter floods the log with assignment NOTEs.
 
         Args:
             sas_code (str): the SAS code snippet to be executed using the Viya Job Execution API Service
+            fresh_session: When True, discard any cached compute session first
+                so the code runs with no inherited SAS state (equivalent to
+                calling ``reset_compute_session`` immediately before).
 
         Returns:
             A dictionary with four string fields describing the executed job:
@@ -43,6 +55,11 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
         """
         logger.info("--- TOOL USED: execute_sas_code ---")
         token = await get_token(ctx)
+        if fresh_session and not COMPUTE_SESSION_ID:
+            # Fixed externally managed sessions can't be reset; run_one_snippet
+            # creates a new cached session transparently after the reset.
+            async with make_client(token) as client:
+                await reset_cached_session(client, CONTEXT_NAME, token)
         return await run_one_snippet(sas_code, "1", token)
 
     @mcp.tool()

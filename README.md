@@ -223,7 +223,7 @@ The headings below match the numbered **tiers** above, so `MCP_TIERS` maps direc
 - **upload_inline_data**: Create a *small* CAS table from inline csv/tsv text passed as a string (a lookup/mapping table the model builds on the fly, or a quick test table). The payload travels through the model's context, so it's for tiny tables only — use **upload_data** for files or anything larger.
 - **promote_table_to_memory**: Load a source table into memory at global scope (idempotent)
 - **list_files**: List files in the Viya Files Service
-- **upload_file**: Upload a file to Viya Files Service
+- **upload_file**: Upload a file to the Viya Files Service, optionally into a Content folder (`parent_folder_uri`). Content comes from exactly one of `content` (inline text), `file_path` (read **server-side**, binary-safe — xlsx, zip, images — gated by `ALLOW_LOCAL_FILE_UPLOAD`), or `url` (server-side fetch)
 - **download_file**: Download file content
 
 #### Tier 3 — Reports & Visualization
