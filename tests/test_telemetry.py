@@ -11,7 +11,9 @@ from fastmcp.tools.base import ToolResult
 
 from sas_mcp_server.telemetry import (
     GOAL_SCHEMA,
+    SUSPECT_DURATION_MS,
     TelemetryMiddleware,
+    classify_error,
     install_telemetry,
 )
 
@@ -522,8 +524,11 @@ def test_parse_log_results_tristate():
     assert parse_log_results("ALWAYS") == "always"
     assert parse_log_results("true") == "always"
     assert parse_log_results("false") == "never"
-    assert parse_log_results(None) == "never"
     assert parse_log_results("banana") == "never"  # warns, degrades safely
+    # Unset defaults to the DIAGNOSTIC mode: with shape-only results a success
+    # and a tool-declared failure look identical in the log.
+    assert parse_log_results(None) == "failures"
+    assert parse_log_results("") == "failures"
 
 
 # --------------------- end-to-end install + on-disk write ------------------- #
@@ -586,3 +591,93 @@ def test_install_disabled_log_path_unusable_returns_none(monkeypatch, tmp_path):
     before = list(mcp.middleware)
     assert install_telemetry(mcp, "stdio") is None
     assert mcp.middleware == before
+
+
+# --------------------- error taxonomy / tier / duration --------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_type", "expected_status"),
+    [
+        ("ValidationError: 1 validation error for call[create_report]", "validation", None),
+        ("ToolError: Error calling tool 'x': Client error '404 Not Found' for url", "client_error", 404),
+        ("ToolError: Server error '500 Internal Server Error' for url", "server_error", 500),
+        ("ToolError: [Errno 11001] getaddrinfo failed", "network", None),
+        ("AuthenticationError: No auth header found", "auth", None),
+        ("ToolError: something odd", "tool", None),
+        ("completely unrecognised text", "unknown", None),
+        (None, None, None),
+        ("", None, None),
+    ],
+)
+def test_classify_error(text, expected_type, expected_status):
+    """Errors are free text; the taxonomy makes them groupable without regex
+    at analysis time (the real log needed exactly these classes)."""
+    assert classify_error(text) == (expected_type, expected_status)
+
+
+@pytest.mark.asyncio
+async def test_record_carries_error_taxonomy_and_always_present_is_error():
+    box = FakeLogger()
+    mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
+    record = mw._build_record(
+        "get_castable_columns",
+        "goal",
+        {},
+        None,
+        "error",
+        True,
+        "ToolError: Client error '404 Not Found' for url",
+        "s1",
+        12.0,
+    )
+    assert record["is_error"] is True  # present on EVERY record, both versions
+    assert record["error_type"] == "client_error"
+    assert record["http_status"] == 404
+    assert "duration_suspect" not in record
+
+
+@pytest.mark.asyncio
+async def test_successful_record_has_null_taxonomy_and_false_is_error():
+    box = FakeLogger()
+    mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
+    record = mw._build_record("echo", "g", {}, {"ok": 1}, "success", False, None, "s1", 5.0)
+    assert record["is_error"] is False
+    assert record["error_type"] is None
+    assert record["http_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_implausible_duration_is_flagged_not_dropped():
+    """Real logs held an 18.8-HOUR call (hung, or the host slept mid-call);
+    unflagged it silently poisons every latency percentile."""
+    box = FakeLogger()
+    mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
+    ok = mw._build_record("echo", "g", {}, None, "success", False, None, "s", SUSPECT_DURATION_MS - 1)
+    bad = mw._build_record("echo", "g", {}, None, "success", False, None, "s", SUSPECT_DURATION_MS + 1)
+    assert "duration_suspect" not in ok
+    assert bad["duration_suspect"] is True
+    assert bad["duration_ms"] == SUSPECT_DURATION_MS + 1  # kept, not clamped
+
+
+@pytest.mark.asyncio
+async def test_tool_tier_is_stamped_from_the_registry(monkeypatch):
+    box = FakeLogger()
+    mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
+    monkeypatch.setattr(mw, "_tool_tiers", {"execute_sas_code": 0, "query_data": 1})
+    assert mw._build_record("execute_sas_code", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] == 0
+    assert mw._build_record("query_data", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] == 1
+    # A tool registered outside register_tools simply has no tier.
+    assert mw._build_record("mystery", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] is None
+
+
+def test_server_version_prefers_the_source_checkout():
+    """importlib.metadata reports the INSTALLED dist, which goes stale under an
+    editable install — real logs said 1.2.0 while the checkout was 1.7.x."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject.open("rb") as fh:
+        expected = tomllib.load(fh)["project"]["version"]
+    assert TelemetryMiddleware._server_version() == expected

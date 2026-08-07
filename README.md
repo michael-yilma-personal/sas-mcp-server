@@ -391,14 +391,14 @@ Set the toggle in `.env` (all options are documented in `.env.sample`):
 COLLECTION_MODE=true
 # optional overrides (defaults shown):
 # COLLECTION_LOG_PATH=~/.sas-mcp-server/tool-usage.log
-# COLLECTION_LOG_RESULTS=never   # never | failures | always (see below)
+# COLLECTION_LOG_RESULTS=failures  # never | failures | always (see below)
 # COLLECTION_SESSION_TAG=        # free-text label stamped into session_start
 ```
 
-Tool **results** are recorded per `COLLECTION_LOG_RESULTS` — a tri-state dial: `never` (default) records only a content-free shape summary (type + key
-names, e.g. `{"_type":"object","_keys":["status","report_id"]}`); `failures` records full (capped + redacted) result contents **only** for calls that
-errored or whose tool declared a failure — the recommended middle ground, since failure diagnostics are the highest-value trace data and rarely carry
-table rows; `always` records result contents on every call. Arguments, goal, status, error text, and the tool-declared outcome fields are captured in
+Tool **results** are recorded per `COLLECTION_LOG_RESULTS` — a tri-state dial: `never` records only a content-free shape summary (type + key
+names, e.g. `{"_type":"object","_keys":["status","report_id"]}`); `failures` (**the default**) records full (capped + redacted) result contents **only** for calls that
+errored or whose tool declared a failure — the middle ground, since failure diagnostics are the highest-value trace data and rarely carry
+table rows, and because under `never` a success and a tool-declared failure are indistinguishable in the log; `always` records result contents on every call. Arguments, goal, status, error text, and the tool-declared outcome fields are captured in
 every mode. (`true`/`false` still work as aliases for `always`/`never`.)
 
 > ⚠️ **Privacy:** when enabled, the log captures your tool inputs (e.g. the SAS code and queries you submit) and — in `failures`/`always` modes — real

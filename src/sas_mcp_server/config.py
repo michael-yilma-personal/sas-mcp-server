@@ -45,11 +45,12 @@ COLLECTION_LOG_BACKUPS = int(os.getenv("COLLECTION_LOG_BACKUPS", "3"))
 # Whether 'goal' is appended to each schema's required[]. Escape hatch = false.
 COLLECTION_REQUIRE_GOAL = env_bool("COLLECTION_REQUIRE_GOAL", True)
 # Privacy dial for tool RESULTS — tri-state:
-#   never    (default) — results recorded as a content-free shape summary
+#   never    — results recorded as a content-free shape summary
 #            ({"_type":"object","_keys":[...names]}), NOT their contents, so
 #            data-sensitive shops contribute usage signal without exfiltrating
-#            table rows or SAS listings.
-#   failures — full (capped + redacted) result contents ONLY when the call
+#            table rows or SAS listings. Note this makes a success and a
+#            tool-declared failure indistinguishable in the log.
+#   failures (DEFAULT) — full (capped + redacted) result contents ONLY when the call
 #            errored at the MCP layer or the tool itself declared a failure
 #            (status apply_failed / invalid_* / not_found / ...). Successes
 #            stay shape-only. The middle ground: failure diagnostics are the
@@ -59,7 +60,15 @@ COLLECTION_REQUIRE_GOAL = env_bool("COLLECTION_REQUIRE_GOAL", True)
 
 
 def parse_log_results(raw: str | None) -> str:
-    """Map a COLLECTION_LOG_RESULTS value to never | failures | always."""
+    """Map a COLLECTION_LOG_RESULTS value to never | failures | always.
+
+    Unset defaults to ``failures``. With shape-only results a success and a
+    tool-declared failure are indistinguishable — both log as
+    ``{"_type": "object", "_keys": 7}`` — so a ``never`` default made the
+    highest-value records (why a call failed) unreadable. Failure bodies are
+    also the least likely to carry table rows, so this keeps the privacy
+    posture that matters while making the log diagnostic.
+    """
     normalized = (raw or "").strip().lower()
     mapping = {
         "always": "always",
@@ -74,7 +83,7 @@ def parse_log_results(raw: str | None) -> str:
         "0": "never",
         "no": "never",
         "off": "never",
-        "": "never",
+        "": "failures",  # unset -> the diagnostic default
     }
     mode = mapping.get(normalized)
     if mode is None:

@@ -21,7 +21,7 @@ cause server-side work, across whichever tiers are enabled. See
 """
 
 from collections.abc import Awaitable, Callable, Iterable
-from typing import cast
+from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 
@@ -68,6 +68,39 @@ TIER_TITLES: dict[int, str] = {
 }
 
 ALL_TIERS: frozenset[int] = frozenset(_TIER_REGISTRARS)
+
+# tool name -> tier, filled in as the tiers register. Telemetry stamps it on
+# every record so usage can be rolled up per tier (which tiers earn their place
+# in a deployment's MCP_TIERS) without a second, drift-prone lookup table.
+TOOL_TIERS: dict[str, int] = {}
+
+
+class _TierRecorder:
+    """FastMCP stand-in that records which tier registered each tool.
+
+    Mirrors :class:`ReadOnlyGate`'s duck-typing so the tier modules stay
+    unmodified, and composes with it (it wraps whichever target is in play).
+    Recording is a side effect only — every call is forwarded untouched.
+    """
+
+    def __init__(self, target: Any, tier: int) -> None:
+        self._target = target
+        self._tier = tier
+
+    def tool(self, name_or_fn: Any = None, **kwargs: Any) -> Any:
+        if callable(name_or_fn):  # bare @mcp.tool
+            TOOL_TIERS[kwargs.get("name") or name_or_fn.__name__] = self._tier
+            return self._target.tool(name_or_fn, **kwargs)
+
+        def decorator(fn: Callable[..., Any]) -> Any:
+            explicit = name_or_fn if isinstance(name_or_fn, str) else kwargs.get("name")
+            TOOL_TIERS[explicit or fn.__name__] = self._tier
+            return self._target.tool(name_or_fn, **kwargs)(fn)
+
+        return decorator
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._target, item)
 
 
 def _parse_tier_spec(spec: str) -> set[int]:
@@ -146,7 +179,8 @@ def register_tools(
         # Tier 8's sole tool is already included when Tier 0 is enabled.
         if tier == 8 and 0 in enabled:
             continue
-        _TIER_REGISTRARS[tier](target, get_token)
+        # Wrapped per tier so TOOL_TIERS learns the tier each tool came from.
+        _TIER_REGISTRARS[tier](cast(FastMCP, _TierRecorder(target, tier)), get_token)
     if gate is not None:
         logger.info(
             "Read-only mode: withheld %d mutating tool(s): %s",

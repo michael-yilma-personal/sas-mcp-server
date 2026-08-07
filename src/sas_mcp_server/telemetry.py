@@ -70,6 +70,49 @@ _TOOL_FAILURE_PREFIXES = ("invalid_", "unknown_", "missing_", "not_")
 _TOOL_FAILURE_SUFFIXES = ("_failed", "_not_found", "_not_supported", "_not_global")
 
 
+# A call this long is almost never a real query: it is a hung call, or a host
+# that slept mid-call (perf_counter keeps counting across suspend). Real logs
+# carried entries up to 18.8 HOURS, silently poisoning every latency
+# percentile. Flagged rather than dropped — the outlier itself is a signal.
+SUSPECT_DURATION_MS = 600_000.0
+
+# Free-text exception/HTTP noise -> a low-cardinality class analysis can group
+# by. Ordered: the first match wins, so specific classes precede generic ones.
+_ERROR_TYPE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bValidationError\b", re.I), "validation"),
+    (re.compile(r"\bAuthenticationError\b|\b401\b|\bUnauthorized\b", re.I), "auth"),
+    (re.compile(r"\b403\b|\bForbidden\b", re.I), "permission"),
+    (re.compile(r"getaddrinfo|ConnectError|ConnectTimeout|Name or service not known", re.I), "network"),
+    (re.compile(r"\bTimeout\b|\bTimedOut\b", re.I), "timeout"),
+    (re.compile(r"Server error '5\d\d|\b5\d\d Internal Server Error\b", re.I), "server_error"),
+    (re.compile(r"Client error '4\d\d|\b4\d\d\b", re.I), "client_error"),
+    (re.compile(r"\bToolError\b", re.I), "tool"),
+)
+_HTTP_STATUS_RE = re.compile(r"\b(?:error ')?([45]\d{2})\b")
+
+
+def classify_error(text: Any) -> tuple[str | None, int | None]:
+    """Map an error string to ``(error_type, http_status)``.
+
+    Errors are logged as free text, so counting "how many 404s" or "how many
+    client-side validation failures" otherwise means re-deriving a regex per
+    analysis. Returns ``(None, None)`` when there is no error text.
+    """
+    if not isinstance(text, str) or not text:
+        return None, None
+    status: int | None = None
+    match = _HTTP_STATUS_RE.search(text)
+    if match:
+        try:
+            status = int(match.group(1))
+        except ValueError:
+            status = None
+    for pattern, label in _ERROR_TYPE_RULES:
+        if pattern.search(text):
+            return label, status
+    return "unknown", status
+
+
 def _is_tool_failure_status(status: Any) -> bool:
     return isinstance(status, str) and (
         status.startswith(_TOOL_FAILURE_PREFIXES)
@@ -117,6 +160,8 @@ class TelemetryMiddleware(Middleware):
         # announced via a session_start header record.
         self._seq: dict[str, int] = {}
         self._announced: set[str] = set()
+        # Lazily resolved tool -> tier map (see _tool_tier).
+        self._tool_tiers: dict[str, int] | None = None
 
     async def on_list_tools(
         self,
@@ -297,6 +342,29 @@ class TelemetryMiddleware(Middleware):
 
     @staticmethod
     def _server_version() -> str | None:
+        """The running server's version.
+
+        ``importlib.metadata`` reports the *installed distribution* metadata,
+        which goes stale under an editable install — real logs carried
+        ``1.2.0`` while the checkout was several releases newer, making the
+        field worse than useless for correlating behaviour to a version. A
+        source checkout's ``pyproject.toml`` is authoritative when present, so
+        it wins; installed deployments (no pyproject alongside the package)
+        fall through to the metadata.
+        """
+        try:
+            import tomllib
+            from pathlib import Path
+
+            # src/sas_mcp_server/telemetry.py -> repo root
+            pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+            if pyproject.is_file():
+                with pyproject.open("rb") as fh:
+                    found = tomllib.load(fh).get("project", {}).get("version")
+                if isinstance(found, str) and found:
+                    return found
+        except Exception:  # noqa: BLE001 - fall through to installed metadata
+            pass
         try:
             from importlib.metadata import version
 
@@ -411,6 +479,22 @@ class TelemetryMiddleware(Middleware):
                     out[key] = value
         return out
 
+    def _tool_tier(self, tool: str) -> int | None:
+        """Tier of *tool*, resolved through the registry the tiers populate.
+
+        Imported lazily and cached: ``tools`` pulls in ``config``, which raises
+        when VIYA_ENDPOINT is unset — this module must stay importable without
+        it (see the module docstring).
+        """
+        if self._tool_tiers is None:
+            try:
+                from .tools import TOOL_TIERS
+
+                self._tool_tiers = TOOL_TIERS
+            except Exception:  # noqa: BLE001 - tier stamping is best-effort
+                self._tool_tiers = {}
+        return self._tool_tiers.get(tool)
+
     @staticmethod
     def _args_hash(arguments: dict[str, Any]) -> str:
         """Stable 12-hex fingerprint of the (goal-stripped) arguments.
@@ -490,12 +574,16 @@ class TelemetryMiddleware(Middleware):
             # Scrub BEFORE bounding — see _tool_outcome.
             bounded_redact(self._scrub_host(error), field_bytes) if error is not None else (None, False)
         )
+        error_type, http_status = classify_error(err_val)
         record = {
             "schema_version": SCHEMA_VERSION,
             "ts": datetime.now(UTC).isoformat(),
             "session_id": session_id,
             "seq": self._next_seq(session_id),
             "tool": tool,
+            # Which tier the tool belongs to, so usage rolls up per tier
+            # (None only if a tool was registered outside register_tools).
+            "tool_tier": self._tool_tier(tool),
             "goal": goal_val,
             "arguments": args_val,
             "arguments_truncated": args_trunc,
@@ -504,9 +592,17 @@ class TelemetryMiddleware(Middleware):
             "result_truncated": res_trunc,
             "result_logged": log_full,
             "status": status,
+            # Present on EVERY record in every mode: v1 had `is_error`, v2 had
+            # only `status` plus an optional `is_tool_error`, so "did this call
+            # fail" needed different logic per version. One field, always here.
+            "is_error": bool(is_error),
             "error": err_val,
+            "error_type": error_type,
+            "http_status": http_status,
             "duration_ms": dur_ms,
         }
+        if dur_ms > SUSPECT_DURATION_MS:
+            record["duration_suspect"] = True
         record.update(outcome)
         return record
 
