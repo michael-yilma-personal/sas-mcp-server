@@ -3,13 +3,16 @@
 
 """Tier 1 — Data Discovery tools (Information Catalog, compute & CAS metadata)."""
 
+import contextlib
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 from fastmcp import Context, FastMCP
 
-from ..config import VIYA_ENDPOINT
+from ..config import CONTEXT_NAME, VIYA_ENDPOINT
+from ..helpers import fedsql_helpers
 from ..viya_client import (
     contains_filter,
     get_json,
@@ -18,6 +21,7 @@ from ..viya_client import (
     raise_for_viya_status,
     return_items,
 )
+from ..viya_utils import submit_job, wait_job
 from ._common import make_session_helpers
 
 
@@ -810,3 +814,135 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
                 "start": start,
                 "limit": limit,
             }
+
+    @mcp.tool()
+    async def query_data(
+        query: str,
+        ctx: Context,
+        target: str = "cas",
+        limit: int = 100,
+        start: int = 0,
+        create_view_name: str = "",
+        compute_context_name: str = "",
+    ) -> dict[str, Any]:
+        """Run a FedSQL SELECT against CAS or compute data and return the rows.
+
+        One SQL surface over both storage tiers, so exploring a caslib table and
+        a SAS library table use the same tool and the same dialect. The query
+        runs in the reusable compute session; nothing is persisted — the result
+        is materialised into session scratch, read back, and dropped.
+
+        **Pick the tier with ``target``** — it selects the namespace, and the two
+        cannot be mixed in one statement (a caslib table and a libref table
+        cannot be joined; stage one side first with execute_sas_code):
+
+        * ``target='cas'`` (default) — qualify as ``caslib.table``
+          (e.g. ``Public.HMEQ``); see list_caslibs / list_castables.
+        * ``target='compute'`` — qualify as ``libref.table`` (e.g. ``WORK.SALES``);
+          see list_compute_libraries / list_compute_tables. **Concatenated
+          librefs — several directories under one name, which is what SASHELP
+          and MAPS are — are invisible to FedSQL**, because its BASE driver maps
+          one schema to one directory. Copy such a table into WORK first
+          (``data work.cars; set sashelp.cars; run;``) and query ``WORK.CARS``.
+
+        **Dialect notes** (FedSQL, not PROC SQL): joins (inner/left/right/full/
+        cross), subqueries, UNION, GROUP BY/HAVING/ORDER BY, and scalar functions
+        work. There is **no WITH/CTE** — use a derived table ``(select ...) "t"``
+        — and **no MERGE**; express a merge as a join (a full join with COALESCE
+        gives upsert semantics). Double-quote identifiers that are reserved words
+        or contain spaces; SAS name literals (``'x'n``) are not FedSQL.
+
+        Row capping is done by this tool, not by your SQL: any LIMIT you write is
+        ignored in favour of ``limit`` (a malformed LIMIT is silently discarded by
+        CAS and would return the whole table). Add ORDER BY for stable paging.
+
+        Args:
+            query: A single FedSQL SELECT statement. DDL/DML is refused — this
+                tool only reads rows.
+            target: Which tier the identifiers refer to — ``cas`` (default) or
+                ``compute``.
+            limit: Maximum rows to return, 1..10000 (default 100).
+            start: Row offset for paging (default 0).
+            create_view_name: If set, the result includes ``create_view_sql`` —
+                the ``CREATE VIEW <name> AS <query>`` text for this query. It is
+                returned for you to run yourself, never executed here.
+            compute_context_name: Compute context to run in; defaults to the
+                server's configured execution context.
+
+        Returns:
+            ``{columns, rows, count, start, limit, truncated, column_types}`` on
+            success — ``rows`` are dicts keyed by column name, with dates
+            rendered as ISO text and missing values as null. ``truncated`` is
+            true when more rows exist beyond this page. On failure, a status dict
+            (``invalid_query``, ``table_not_found``, ``column_not_found``,
+            ``schema_not_found``, ``ambiguous_column``, ``syntax_error``,
+            ``query_failed``) whose ``message`` names the fix.
+        """
+        if target not in ("cas", "compute"):
+            return {
+                "status": "invalid_query",
+                "message": f"target must be 'cas' or 'compute' (got {target!r}).",
+            }
+        error = fedsql_helpers.screen_query(query, limit, start)
+        if error is not None:
+            return error
+
+        uid = uuid.uuid4().hex[:8]
+        code = fedsql_helpers.build_query_code(
+            query, target=target, limit=limit, start=start, uid=uid
+        )
+        context_name = compute_context_name or CONTEXT_NAME
+        async with compute_tool_session("query_data", ctx, context_name) as (client, session_id):
+            job_id = await submit_job(client, session_id, code)
+            # poll=0.5: the 2s default dominates the ~0.6s a small query takes.
+            state, log, _ = await wait_job(client, session_id, job_id, poll=0.5)
+            try:
+                # A failed FedSQL step can still report state 'completed', so the
+                # log is the authority on success — never the state alone.
+                mapped = fedsql_helpers.map_error(log)
+                if mapped is not None:
+                    return mapped
+                if state != "completed":
+                    return {
+                        "status": "query_failed",
+                        "message": f"The query ended in state '{state}' without a reported error.",
+                        "sas_errors": [],
+                    }
+
+                col_items, _ = await get_paged_items(
+                    f"/compute/sessions/{session_id}/data/WORK/_Q{uid}/columns",
+                    client,
+                    limit=1000,
+                )
+                columns = fedsql_helpers.describe_columns(col_items)
+                # Rows come from the format-stripped twin so numerics stay
+                # numeric and missings stay null; formats are taken from the
+                # columns above to restore dates.
+                row_items, _ = await get_paged_items(
+                    f"/compute/sessions/{session_id}/data/WORK/_F{uid}/rows",
+                    client,
+                    # One past the page: the extra row is what proves more data
+                    # exists. It is materialised by the injected cap and trimmed
+                    # off below, so it never reaches the caller.
+                    limit=limit + 1,
+                    start=start,
+                )
+                truncated = len(row_items) > limit
+                rows = fedsql_helpers.convert_rows(row_items[:limit], columns)
+                result: dict[str, Any] = {
+                    "columns": [c["name"] for c in columns],
+                    "rows": rows,
+                    "count": len(rows),
+                    "start": start,
+                    "limit": limit,
+                    "truncated": truncated,
+                    "column_types": {c["name"]: c["type"] for c in columns},
+                }
+                if create_view_name:
+                    result["create_view_sql"] = fedsql_helpers.build_view_sql(query, create_view_name)
+                return result
+            finally:
+                # Best effort: WORK dies with the session anyway, but a long-lived
+                # warm session would otherwise accumulate scratch tables.
+                with contextlib.suppress(Exception):
+                    await submit_job(client, session_id, fedsql_helpers.build_cleanup_code(uid))

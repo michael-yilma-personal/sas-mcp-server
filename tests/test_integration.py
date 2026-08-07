@@ -1535,6 +1535,7 @@ TOOL_COVERAGE = {
     "get_castable_info": "test_cas_discovery_workflow",
     "get_castable_columns": "test_cas_discovery_workflow",
     "get_castable_data": "test_cas_discovery_workflow",
+    "query_data": "test_fedsql_query_workflow",
     "upload_data": "test_upload_data_file_path_and_formats",
     "upload_inline_data": "test_data_upload_workflow",
     "promote_table_to_memory": "test_promote_from_source_workflow",
@@ -1622,3 +1623,167 @@ async def test_every_prompt_has_integration_coverage(integration_mcp_server):
     stale = set(PROMPT_RENDER_ARGS) - registered
     assert not missing, f"Prompts with no integration test: {sorted(missing)}"
     assert not stale, f"Render args for prompts that no longer exist: {sorted(stale)}"
+
+
+# -----------------------------------------------------------------------
+# FedSQL query workflow (query_data)
+# -----------------------------------------------------------------------
+
+
+async def test_fedsql_query_workflow(integration_mcp_server):
+    """query_data over both tiers: CAS caslib, compute libref, and the guards.
+
+    Exercises the whole path against live Viya — the generated FedSQL, the
+    server-side row cap, the format-stripped read-back, and the error mapping.
+    """
+    async with Client(integration_mcp_server) as client:
+    
+        # --- CAS target: the row cap is enforced server-side --------------------
+        result = (
+            await client.call_tool(
+                "query_data",
+                {"query": "select LOAN, MORTDUE, JOB from Public.HMEQ", "limit": 3},
+            )
+        ).data
+        if result.get("status") == "table_not_found":
+            pytest.skip("HMEQ not loaded in Public caslib on this Viya")
+        assert result["columns"] == ["LOAN", "MORTDUE", "JOB"]
+        assert len(result["rows"]) == 3
+        assert result["count"] == 3
+
+        # A LIMIT written by the caller must not override the tool's cap: CAS
+        # silently discards a malformed one, so the tool never trusts it.
+        capped = (
+            await client.call_tool(
+                "query_data", {"query": "select LOAN from Public.HMEQ limit 9999", "limit": 2}
+            )
+        ).data
+        assert len(capped["rows"]) == 2
+
+        # --- aggregation + join over CAS ---------------------------------------
+        grouped = (
+            await client.call_tool(
+                "query_data",
+                {
+                    "query": (
+                        "select JOB, count(*) as n from Public.HMEQ "
+                        "where JOB is not null group by JOB having count(*) > 10 order by n desc"
+                    ),
+                    "limit": 5,
+                },
+            )
+        ).data
+        assert grouped["columns"] == ["JOB", "N"]
+        assert grouped["rows"], "expected at least one group"
+
+        joined = (
+            await client.call_tool(
+                "query_data",
+                {
+                    "query": (
+                        "select a.JOB, a.LOAN, b.LOAN as b_loan from Public.HMEQ a "
+                        "inner join Public.HMEQ b on a.JOB = b.JOB where a.LOAN > 50000"
+                    ),
+                    "limit": 3,
+                },
+            )
+        ).data
+        assert joined["columns"] == ["JOB", "LOAN", "B_LOAN"]
+
+        # --- compute target: formats, dates, and missing values -----------------
+        await client.call_tool(
+            "execute_sas_code",
+            {
+                "sas_code": (
+                    "data work._mcp_q_it;\n"
+                    "  length name $10;\n"
+                    "  name='ann'; sal=50000; hired='01FEB2020'd; output;\n"
+                    "  name='bob'; sal=.;     hired=.;            output;\n"
+                    "  format sal dollar12.2 hired date9.;\n"
+                    "run;"
+                )
+            },
+        )
+        typed = (
+            await client.call_tool(
+                "query_data",
+                {
+                    "query": "select name, sal, hired from WORK._mcp_q_it order by name",
+                    "target": "compute",
+                    "limit": 10,
+                },
+            )
+        ).data
+        assert [r["name"] for r in typed["rows"]] == ["ann", "bob"]
+        # Formatted values must arrive as numbers and ISO dates, not padded strings.
+        assert typed["rows"][0]["sal"] == 50000
+        assert typed["rows"][0]["hired"] == "2020-02-01"
+        assert typed["rows"][1]["sal"] is None
+        assert typed["rows"][1]["hired"] is None
+
+        # --- truncation flag ----------------------------------------------------
+        page = (
+            await client.call_tool(
+                "query_data", {"query": "select LOAN from Public.HMEQ", "limit": 1}
+            )
+        ).data
+        assert page["truncated"] is True
+
+        # --- create_view_sql is returned, never executed ------------------------
+        viewed = (
+            await client.call_tool(
+                "query_data",
+                {"query": "select JOB from Public.HMEQ", "limit": 1, "create_view_name": "mcp_it_view"},
+            )
+        ).data
+        assert viewed["create_view_sql"].startswith("create view mcp_it_view as")
+
+        # --- error mapping and the write guard ----------------------------------
+        missing = (
+            await client.call_tool(
+                "query_data", {"query": "select x from Public.NOPE_MCP_IT", "limit": 1}
+            )
+        ).data
+        assert missing["status"] == "table_not_found"
+
+        refused = (
+            await client.call_tool("query_data", {"query": "drop table Public.HMEQ"})
+        ).data
+        assert refused["status"] == "invalid_query"
+
+        macro = (
+            await client.call_tool(
+                "query_data", {"query": 'select LOAN from Public.HMEQ where JOB = "&sysuserid"'}
+            )
+        ).data
+        assert macro["status"] == "invalid_query"
+
+        # An unterminated literal must never be submitted: SAS would keep
+        # consuming, hanging this compute session for every later call.
+        unbalanced = (
+            await client.call_tool(
+                "query_data", {"query": "select LOAN from Public.HMEQ where JOB = 'Sales"}
+            )
+        ).data
+        assert unbalanced["status"] == "invalid_query"
+        assert "unbalanced quote" in unbalanced["message"]
+
+        # A correctly escaped literal (doubled quote) is just a value.
+        escaped = (
+            await client.call_tool(
+                "query_data",
+                {"query": "select JOB from Public.HMEQ where JOB = 'x'' or ''1''=''1'", "limit": 3},
+            )
+        ).data
+        assert escaped["count"] == 0
+
+        # A failed query must not poison the session for the next one.
+        recovered = (
+            await client.call_tool("query_data", {"query": "select LOAN from Public.HMEQ", "limit": 2})
+        ).data
+        assert len(recovered["rows"]) == 2
+
+        await client.call_tool(
+            "execute_sas_code",
+            {"sas_code": "proc datasets library=work nolist nowarn; delete _mcp_q_it; quit;"},
+        )

@@ -103,6 +103,13 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # Tier 1
         "catalog_run_agent",  # spawns a run, leaves history
         "catalog_run_adhoc_analysis",  # spawns a profiling job
+        # Runs caller-submitted FedSQL in a compute session: it spawns a job and
+        # materialises scratch tables, so it "causes server-side work" whatever
+        # the statement says. Its SELECT-only screen is a strong guard but the
+        # sole one — PROC FEDSQL ignores a libref's access=readonly (verified:
+        # a DATA step write is denied, FedSQL's CREATE/UPDATE/DELETE/DROP on the
+        # same libref succeed), so there is no library-level backstop behind it.
+        "query_data",
         # Tier 2
         "upload_data",
         "upload_inline_data",

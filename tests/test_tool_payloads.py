@@ -28,6 +28,7 @@ EXPECTED_TOOLS = [
     "get_castable_info",
     "get_castable_columns",
     "get_castable_data",
+    "query_data",
     "upload_data",
     "upload_inline_data",
     "promote_table_to_memory",
@@ -3231,3 +3232,148 @@ async def test_catalog_download_table_profile_not_found(mcp_server_with_mock_cli
 
     assert result["status"] == "not_found"
     assert result["instance_id"] == "missing"
+
+
+# -----------------------------------------------------------------------
+# query_data (FedSQL) — generated program and result shaping
+# -----------------------------------------------------------------------
+
+
+def _stub_compute_session(mock_client):
+    """Route the compute-context lookup + session create the tool needs."""
+    context_resp = _make_mock_response({"items": [{"id": "ctx-id"}]})
+    original_get = mock_client.get.return_value
+
+    def route_get(url, **kwargs):
+        if url.endswith("/compute/contexts"):
+            return context_resp
+        return original_get
+
+    mock_client.get.side_effect = route_get
+    mock_client.post.return_value = _make_mock_response({"id": "sess-id"}, status_code=201)
+
+
+async def test_query_data_generates_capped_fedsql_and_shapes_rows(mcp_server_with_mock_client):
+    """The submitted program wraps the query with our own LIMIT, and rows come
+    from the format-stripped twin while formats come from the original."""
+    mcp, mock_client = mcp_server_with_mock_client
+    _stub_compute_session(mock_client)
+    submitted: dict[str, str] = {}
+
+    async def fake_submit(client, session_id, code):
+        # setdefault: the tool submits a second, cleanup job afterwards.
+        submitted.setdefault("code", code)
+        return "JOB1"
+
+    async def fake_wait(client, session_id, job_id, poll=2):
+        return "completed", "NOTE: PROCEDURE FEDSQL used", ""
+
+    async def fake_paged(path, client, **kwargs):
+        if path.endswith("/columns"):
+            return [
+                {"name": "d", "type": "FLOAT", "format": {"name": "DATE9."}},
+                {"name": "amt", "type": "FLOAT"},
+            ], 2
+        return [{"cells": [24107, 1234.5]}], 1
+
+    with patch("sas_mcp_server.tools.discovery.submit_job", side_effect=fake_submit), \
+         patch("sas_mcp_server.tools.discovery.wait_job", side_effect=fake_wait), \
+         patch("sas_mcp_server.tools.discovery.get_paged_items", side_effect=fake_paged):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "query_data", {"query": "select d, amt from Public.T", "limit": 5}
+            )
+
+    assert "limit 6" in submitted["code"]  # limit + 1 truncation probe
+    assert "cas _mcpq" in submitted["code"] and "terminate;" in submitted["code"]
+    assert result.data["columns"] == ["d", "amt"]
+    assert result.data["rows"] == [{"d": "2026-01-01", "amt": 1234.5}]
+    assert result.data["count"] == 1
+    assert result.data["truncated"] is False
+    assert result.data["column_types"] == {"d": "FLOAT", "amt": "FLOAT"}
+
+
+async def test_query_data_flags_truncation_from_the_extra_row(mcp_server_with_mock_client):
+    """The page is read one row long: that extra row is the only truncation
+    signal, and trimming it before the read made `truncated` always False."""
+    mcp, mock_client = mcp_server_with_mock_client
+    _stub_compute_session(mock_client)
+    asked: dict[str, int] = {}
+
+    async def fake_paged(path, client, **kwargs):
+        if path.endswith("/columns"):
+            return [{"name": "a", "type": "FLOAT"}], 1
+        asked["limit"] = kwargs["limit"]
+        return [{"cells": [1]}, {"cells": [2]}, {"cells": [3]}], 3
+
+    async def fake_wait(client, session_id, job_id, poll=2):
+        return "completed", "", ""
+
+    with patch("sas_mcp_server.tools.discovery.submit_job", new=AsyncMock(return_value="J")), \
+         patch("sas_mcp_server.tools.discovery.wait_job", side_effect=fake_wait), \
+         patch("sas_mcp_server.tools.discovery.get_paged_items", side_effect=fake_paged):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "query_data", {"query": "select a from Public.T", "limit": 2}
+            )
+
+    assert asked["limit"] == 3  # limit + 1
+    assert result.data["truncated"] is True
+    assert result.data["count"] == 2  # the probe row is trimmed off
+    assert result.data["rows"] == [{"a": 1}, {"a": 2}]
+
+
+async def test_query_data_maps_a_sas_error_without_raising(mcp_server_with_mock_client):
+    """A FedSQL failure becomes a structured status dict — and is detected from
+    the log even though the job state says 'completed'."""
+    mcp, mock_client = mcp_server_with_mock_client
+    _stub_compute_session(mock_client)
+
+    async def fake_wait(client, session_id, job_id, poll=2):
+        return "completed", 'ERROR: Table "PUBLIC.NOPE" does not exist or cannot be accessed', ""
+
+    with patch("sas_mcp_server.tools.discovery.submit_job", new=AsyncMock(return_value="J")), \
+         patch("sas_mcp_server.tools.discovery.wait_job", side_effect=fake_wait):
+        async with Client(mcp) as client:
+            result = await client.call_tool("query_data", {"query": "select a from Public.NOPE"})
+
+    assert result.data["status"] == "table_not_found"
+    assert "PUBLIC.NOPE" in result.data["message"]
+
+
+async def test_query_data_refuses_writes_before_touching_viya(mcp_server_with_mock_client):
+    """The screen is pre-flight: a write verb never reaches a compute session."""
+    mcp, _ = mcp_server_with_mock_client
+    with patch("sas_mcp_server.tools.discovery.submit_job", new=AsyncMock()) as submit:
+        async with Client(mcp) as client:
+            result = await client.call_tool("query_data", {"query": "delete from Public.T"})
+    assert result.data["status"] == "invalid_query"
+    assert "DELETE" in result.data["message"]
+    submit.assert_not_awaited()
+
+
+async def test_query_data_returns_view_sql_without_executing_it(mcp_server_with_mock_client):
+    mcp, mock_client = mcp_server_with_mock_client
+    _stub_compute_session(mock_client)
+    submitted: dict[str, str] = {}
+
+    async def fake_submit(client, session_id, code):
+        submitted.setdefault("code", code)
+        return "J"
+
+    async def fake_wait(client, session_id, job_id, poll=2):
+        return "completed", "", ""
+
+    async def fake_paged(path, client, **kwargs):
+        return ([{"name": "a", "type": "CHAR"}], 1) if path.endswith("/columns") else ([], 0)
+
+    with patch("sas_mcp_server.tools.discovery.submit_job", side_effect=fake_submit), \
+         patch("sas_mcp_server.tools.discovery.wait_job", side_effect=fake_wait), \
+         patch("sas_mcp_server.tools.discovery.get_paged_items", side_effect=fake_paged):
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "query_data", {"query": "select a from Public.T", "create_view_name": "v1"},
+            )
+
+    assert result.data["create_view_sql"] == "create view v1 as\nselect a from Public.T;"
+    assert "create view" not in submitted["code"].lower()
