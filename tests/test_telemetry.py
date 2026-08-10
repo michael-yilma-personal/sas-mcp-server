@@ -305,12 +305,31 @@ async def test_logger_failure_never_breaks_call():
     assert "goal" not in seen["args"]
 
 
-def test_run_id_is_per_middleware_and_stable():
-    """The grouping key is minted per process, not read off the transport."""
+def test_run_id_is_per_process_not_per_instance():
+    """The grouping key is minted per PROCESS, not read off the transport.
+
+    Two middlewares in one process (a composed server, a re-import) must not
+    look like two server runs sharing a pid — the header stamps both.
+    """
     a = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
-    b = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
-    assert a.run_id and a.run_id == a.run_id
-    assert a.run_id != b.run_id
+    b = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="http")
+    assert a.run_id
+    assert a.run_id == b.run_id
+
+
+@pytest.mark.asyncio
+async def test_run_id_is_stable_across_calls():
+    """Pins the regression a `@property` returning a fresh uuid would cause."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(_ctx("t", {"goal": "a"}), call_next)
+    await mw.on_call_tool(_ctx("t", {"goal": "b"}), call_next)
+    ids = {r["run_id"] for r in logger.records}
+    assert len(ids) == 1
 
 
 def test_extract_output_prefers_structured_then_content():
@@ -481,8 +500,92 @@ async def test_grouping_ignores_transport_session_identity():
     assert all("session_id" not in r for r in logger.records)
 
 
+def _client_ctx(name, version, goal="g"):
+    ctx = _ctx("t", {"goal": goal})
+    ctx.fastmcp_context = SimpleNamespace(
+        request_context=SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=SimpleNamespace(
+                    clientInfo=SimpleNamespace(name=name, version=version)
+                )
+            )
+        )
+    )
+    return ctx
+
+
 @pytest.mark.asyncio
-async def test_client_label_is_per_record_and_omitted_when_unknown():
+async def test_header_is_re_emitted_so_rotation_cannot_orphan_records(monkeypatch):
+    """A header written once per process is simply gone after rotation."""
+    import sas_mcp_server.telemetry as telemetry_mod
+
+    monkeypatch.setattr(telemetry_mod, "HEADER_INTERVAL_RECORDS", 3)
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    for _ in range(7):
+        await mw.on_call_tool(_ctx("t", {"goal": "g"}), call_next)
+
+    headers = [r for r in logger.records if r.get("record") == "run_start"]
+    calls = [r for r in logger.records if r.get("record") != "run_start"]
+    assert len(calls) == 7
+    assert len(headers) == 3  # records 1, 4, 7
+    # Every emission is identical, so a consumer may take any one of them —
+    # that is what makes re-emitting safe rather than a duplicate-key hazard.
+    assert all(h == headers[0] for h in headers)
+    # seq keeps running across headers; the run is one trace, not three.
+    assert [r["seq"] for r in calls] == [1, 2, 3, 4, 5, 6, 7]
+
+
+@pytest.mark.asyncio
+async def test_header_is_retried_when_the_first_write_fails():
+    """The header must not be lost for the whole run because of one bad write."""
+
+    class FlakyLogger(FakeLogger):
+        def __init__(self):
+            super().__init__()
+            self.fail_next = True
+
+        def write(self, record):
+            if self.fail_next:
+                self.fail_next = False
+                raise OSError("disk full")
+            super().write(record)
+
+    logger = FlakyLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(_ctx("t", {"goal": "a"}), call_next)  # write blows up
+    assert logger.records == []
+    await mw.on_call_tool(_ctx("t", {"goal": "b"}), call_next)
+    assert logger.records[0].get("record") == "run_start"  # retried, not lost
+
+
+@pytest.mark.asyncio
+async def test_header_ts_is_the_run_start_not_the_first_call():
+    """run_start.ts must anchor the run, not duplicate the first call's ts."""
+    import sas_mcp_server.telemetry as telemetry_mod
+
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="stdio")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(_ctx("t", {"goal": "g"}), call_next)
+    header = logger.records[0]
+    assert header["ts"] == telemetry_mod._RUN_STARTED_AT
+    assert header["ts"] < logger.records[-1]["ts"]
+
+
+@pytest.mark.asyncio
+async def test_client_identity_is_per_record_and_omitted_when_unknown():
     """Client identity belongs to the caller, so it rides on each record."""
     logger = FakeLogger()
     mw = TelemetryMiddleware(logger, require_goal=True, transport="http")
@@ -490,25 +593,49 @@ async def test_client_label_is_per_record_and_omitted_when_unknown():
     async def call_next(_):
         return ToolResult(structured_content={"ok": True})
 
-    known = _ctx("t", {"goal": "g"})
-    known.fastmcp_context = SimpleNamespace(
-        request_context=SimpleNamespace(
-            session=SimpleNamespace(
-                client_params=SimpleNamespace(
-                    clientInfo=SimpleNamespace(name="claude-code", version="2.1.0")
-                )
-            )
-        )
-    )
-    await mw.on_call_tool(known, call_next)
-    assert logger.records[-1]["client"] == "claude-code/2.1.0"
+    await mw.on_call_tool(_client_ctx("claude-code", "2.1.0"), call_next)
+    assert logger.records[-1]["client_name"] == "claude-code"
+    assert logger.records[-1]["client_version"] == "2.1.0"
 
     # No handshake reachable (routine when sessionless): omitted, not null.
     await mw.on_call_tool(_ctx("t", {"goal": "g"}), call_next)
-    assert "client" not in logger.records[-1]
+    assert "client_name" not in logger.records[-1]
     # ...and never in the header, which only holds per-run constants.
     header = next(r for r in logger.records if r.get("record") == "run_start")
-    assert "client" not in header and "client_name" not in header
+    assert "client_name" not in header and "client" not in header
+
+
+@pytest.mark.asyncio
+async def test_client_identity_is_kept_as_two_fields_not_joined():
+    """A name containing '/' must stay splittable from its version."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="http")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(_client_ctx("acme/agent-sdk", "1.0"), call_next)
+    assert logger.records[-1]["client_name"] == "acme/agent-sdk"
+    assert logger.records[-1]["client_version"] == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_client_identity_is_redacted_and_bounded():
+    """clientInfo is caller-supplied, so it gets the same treatment as any
+    other logged field — .env.sample promises capped + Bearer/JWT-scrubbed."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="http")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    await mw.on_call_tool(
+        _client_ctx("x" * 4000, "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.def"),
+        call_next,
+    )
+    rec = logger.records[-1]
+    assert len(rec["client_name"]) <= 160  # capped well under a field budget
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in rec["client_version"]
 
 
 @pytest.mark.asyncio
@@ -678,8 +805,7 @@ async def test_record_carries_error_taxonomy_and_always_present_is_error():
         "error",
         True,
         "ToolError: Client error '404 Not Found' for url",
-        "s1",
-        12.0,
+        dur_ms=12.0,
     )
     assert record["is_error"] is True  # present on EVERY record, both versions
     assert record["error_type"] == "client_error"
@@ -691,10 +817,12 @@ async def test_record_carries_error_taxonomy_and_always_present_is_error():
 async def test_successful_record_has_null_taxonomy_and_false_is_error():
     box = FakeLogger()
     mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
-    record = mw._build_record("echo", "g", {}, {"ok": 1}, "success", False, None, "s1", 5.0)
+    record = mw._build_record("echo", "g", {}, {"ok": 1}, "success", False, None, dur_ms=5.0)
     assert record["is_error"] is False
     assert record["error_type"] is None
     assert record["http_status"] is None
+    # No handshake reachable -> the client keys are omitted, not null.
+    assert "client_name" not in record and "client_version" not in record
 
 
 @pytest.mark.asyncio
@@ -703,8 +831,8 @@ async def test_implausible_duration_is_flagged_not_dropped():
     unflagged it silently poisons every latency percentile."""
     box = FakeLogger()
     mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
-    ok = mw._build_record("echo", "g", {}, None, "success", False, None, "s", SUSPECT_DURATION_MS - 1)
-    bad = mw._build_record("echo", "g", {}, None, "success", False, None, "s", SUSPECT_DURATION_MS + 1)
+    ok = mw._build_record("echo", "g", {}, None, "success", False, None, dur_ms=SUSPECT_DURATION_MS - 1)
+    bad = mw._build_record("echo", "g", {}, None, "success", False, None, dur_ms=SUSPECT_DURATION_MS + 1)
     assert "duration_suspect" not in ok
     assert bad["duration_suspect"] is True
     assert bad["duration_ms"] == SUSPECT_DURATION_MS + 1  # kept, not clamped
@@ -715,10 +843,10 @@ async def test_tool_tier_is_stamped_from_the_registry(monkeypatch):
     box = FakeLogger()
     mw = TelemetryMiddleware(box, require_goal=True, transport="stdio")
     monkeypatch.setattr(mw, "_tool_tiers", {"execute_sas_code": 0, "query_data": 1})
-    assert mw._build_record("execute_sas_code", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] == 0
-    assert mw._build_record("query_data", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] == 1
+    assert mw._build_record("execute_sas_code", "g", {}, None, "success", False, None, dur_ms=1.0)["tool_tier"] == 0
+    assert mw._build_record("query_data", "g", {}, None, "success", False, None, dur_ms=1.0)["tool_tier"] == 1
     # A tool registered outside register_tools simply has no tier.
-    assert mw._build_record("mystery", "g", {}, None, "success", False, None, "s", 1.0)["tool_tier"] is None
+    assert mw._build_record("mystery", "g", {}, None, "success", False, None, dur_ms=1.0)["tool_tier"] is None
 
 
 def test_server_version_prefers_the_source_checkout():

@@ -98,6 +98,16 @@ COLLECTION_LOG_RESULTS = parse_log_results(os.getenv("COLLECTION_LOG_RESULTS"))
 # Free-text experiment label stamped into each run_start record — tag A/B runs
 # (skill on/off, server build) so traces are self-describing.
 COLLECTION_RUN_TAG = os.getenv("COLLECTION_RUN_TAG", "") or None
+# Accept the former name so an existing .env keeps labelling its runs. Dropping
+# it silently would only surface AFTER an A/B arm finished, as an untagged
+# header — i.e. the arm has to be re-run. Warn like parse_log_results does.
+_legacy_tag = os.getenv("COLLECTION_SESSION_TAG", "") or None
+if _legacy_tag and not COLLECTION_RUN_TAG:
+    logging.getLogger(__name__).warning(
+        "COLLECTION_SESSION_TAG is deprecated; using it as COLLECTION_RUN_TAG. "
+        "Rename it — telemetry groups by run, not by MCP session."
+    )
+    COLLECTION_RUN_TAG = _legacy_tag
 
 _logger = logging.getLogger(__name__)
 

@@ -375,19 +375,22 @@ When enabled it does two things:
 
 1. **Injects a required `goal` parameter** into every tool's schema, asking the model to state in one sentence *why* it chose that tool for the current
    request. The `goal` is stripped from the arguments before the real tool runs, so tools never see it.
-2. **Appends one JSON line per tool call** (JSON Lines / NDJSON, schema v2) to a local log file: timestamp, run id, per-run sequence number, tool
-   name, goal, arguments (plus a stable `args_hash` for retry analysis), result, status, error, and latency. When a tool *declares* a failure as data
+2. **Appends one JSON line per tool call** (JSON Lines / NDJSON, schema v3) to a local log file: timestamp, run id, per-run sequence number, tool
+   name, goal, arguments (plus a stable `args_hash` for retry analysis), result, status, error, latency, and the calling client's
+   `client_name` / `client_version`. When a tool *declares* a failure as data
    (e.g. `{"status": "apply_failed"}`, which the MCP layer sees as success), the record also carries `tool_status` / `is_tool_error` /
-   `tool_message` / `failed_operation_index` — so tool-level failure rates are analyzable in every mode. Each server process opens with one
-   `run_start` header record (transport, pid, server version, result mode, and an optional `COLLECTION_RUN_TAG`
-   label for tagging A/B runs). Secret-shaped keys and inline Bearer/JWT tokens are redacted, the Viya hostname is masked in error/result
-   text, and every field is size-capped.
+   `tool_message` / `failed_operation_index` — so tool-level failure rates are analyzable in every mode. A `run_start` header record
+   (transport, pid, server version, result mode, and an optional `COLLECTION_RUN_TAG` label for tagging A/B runs) opens the log and is
+   **re-emitted every 1000 records**, so rotation cannot leave a stretch of the log with no header to resolve; every emission is
+   byte-identical, so any one of them will do. Secret-shaped keys and inline Bearer/JWT tokens are redacted, the Viya hostname is masked in
+   error/result text, and every field is size-capped.
 
    **Records group by `run_id` — one per server process — not by MCP session.** The protocol is moving to a *sessionless* model (FastMCP 4 makes
    it the default) in which `session_id` is absent or minted per request, so grouping on it would shatter every trace into single-call fragments.
-   Under stdio, one process serves one client, so a run *is* that client's trace. Under HTTP a run spans every client the process served; the
-   per-record `client` field (`name/version`, from the MCP handshake, omitted when unavailable) separates them, as does a per-process
-   `COLLECTION_LOG_PATH`.
+   Under stdio, one process serves one client, so a run *is* that client's trace. Under HTTP a run spans every client the process served, and
+   `client_name`/`client_version` are the only thing separating them — **two users on the same client software share one `run_id` and one `seq`
+   counter**, which is an accepted limitation of dropping the session key, not something a per-process `COLLECTION_LOG_PATH` can fix (that splits
+   by process, the axis `run_id` already covers).
 
 ### Enabling it
 

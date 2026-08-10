@@ -10,16 +10,22 @@ and stdio (it relies solely on ``context.message`` and NEVER calls
 get_http_request).
 
 NO MCP SESSION DEPENDENCY. Records are grouped by ``run_id`` — a UUID minted
-once per server process — not by the transport's MCP session id. The protocol
-is moving to a SESSIONLESS era (FastMCP 4 makes it the default), where
+once per process, at import — not by the transport's MCP session id. The
+protocol is moving to a SESSIONLESS era (FastMCP 4 makes it the default), where
 ``fastmcp_context.session_id`` is absent or synthesized per request; grouping on
 it would silently shatter every trace into one-call fragments. A process-scoped
 id degrades honestly instead: under stdio one process IS one client, so it is
-exactly as informative as the session id was; under HTTP it groups by server
-process, so per-client separation comes from the per-record ``client`` field or
-a per-process COLLECTION_LOG_PATH rather than from the protocol. Client
-identity is stamped per record, not once in the header, precisely because it is
-NOT a per-run constant once a process serves several clients.
+exactly as informative as the session id was. Under HTTP a run spans every
+client the process served, and ``client_name``/``client_version`` are the only
+thing that tells them apart — an ACCEPTED limitation, not an oversight: there
+is no protocol-level per-client key left to record.
+
+Every record is SELF-CONTAINED, and the ``run_start`` header is re-emitted
+every HEADER_INTERVAL_RECORDS calls. Log rotation discards whole files, so a
+header written once per process is simply gone from a long-lived server's
+retained log, taking the run's constants (and the A/B tag) with it. Because the
+header's fields — including its ``ts`` — are true for the whole run, every
+re-emission is byte-identical, so a consumer may take any one of them.
 
 The disk write is offloaded to a worker thread via ``anyio.to_thread`` so the
 blocking file I/O and any RotatingFileHandler rollover never run on the asyncio
@@ -63,12 +69,32 @@ from .usage_logger import GOAL_KEY, UsageLogger, bounded_redact
 
 module_logger = logging.getLogger(__name__)
 
-# v2: run_start header records; per-call seq/args_hash; tool-DECLARED
+# v2: session_start header records; per-call seq/args_hash; tool-DECLARED
 # outcome fields (tool_status/tool_message/...); tri-state result logging
 # (never|failures|always) with per-record result_logged; per-record transport
-# dropped (a constant — see the run_start record). v1's `session_id` is gone:
-# grouping is by process-scoped `run_id` (see the module docstring).
-SCHEMA_VERSION = 2
+# dropped (a constant — see the header record).
+# v3: `session_id` -> process-scoped `run_id`, `session_start` -> `run_start`
+# (+ pid, re-emitted periodically), and the header's client_name/client_version
+# moved onto every record. The shape is NOT v2-compatible and a v2 log can sit
+# in the same file after an upgrade, so this MUST stay bumped — a reader keying
+# on `run_id` silently drops every v2 line, and a v2 `session_start` header
+# passes a naive `record != "run_start"` filter as if it were a tool call.
+SCHEMA_VERSION = 3
+
+# ONE run identity per PROCESS, not per middleware instance: two middlewares in
+# one process (a composed/mounted server, a re-import) must not look like two
+# server runs sharing a pid. Stamped at import, which is server startup — so the
+# header's ts answers "when did this server come up", not "when was it first
+# used"; the two can be hours apart on an idle deployment.
+_RUN_ID = str(uuid4())
+_RUN_STARTED_AT = datetime.now(UTC).isoformat()
+
+# Re-emit the run_start header every N call records. Sized so a header survives
+# in any retained window: at the ~630 bytes/record measured on real logs, the
+# 10 MiB default rotation holds ~16k records, so 1000 gives ~16 anchors per file
+# at ~0.1% overhead. Rotation is not the only truncation — operators tail and
+# split these files too.
+HEADER_INTERVAL_RECORDS = 1000
 
 # Statuses this repo's tools use to declare a failure AS DATA (the MCP layer
 # sees success). Logging them per record turns 'success' rows into an honest
@@ -166,13 +192,16 @@ class TelemetryMiddleware(Middleware):
             log_results = "always" if log_results else "never"
         self.result_mode = log_results if log_results in ("always", "failures", "never") else "never"
         self.run_tag = run_tag
-        # The ONLY grouping key. Minted here, so it is stable for the life of
-        # the process and independent of the MCP session model.
-        self.run_id = str(uuid4())
-        # Next per-call sequence number, and whether this run has already been
-        # announced with a run_start header record.
+        # The ONLY grouping key — process-scoped, independent of the MCP
+        # session model (see the module docstring).
+        self.run_id = _RUN_ID
         self._seq = 0
-        self._announced = False
+        # Records written since the last run_start. Starts AT the interval so
+        # the header precedes the very first record.
+        self._since_header = HEADER_INTERVAL_RECORDS
+        # Raw (name, version) -> sanitized (name, version), so the redact+bound
+        # runs once per distinct client rather than once per call.
+        self._client_cache: dict[tuple[str | None, str | None], tuple[str | None, str | None]] = {}
         # Lazily resolved tool -> tier map (see _tool_tier).
         self._tool_tiers: dict[str, int] | None = None
 
@@ -223,7 +252,7 @@ class TelemetryMiddleware(Middleware):
         cleaned_ctx = context.copy(
             message=context.message.model_copy(update={"arguments": raw})
         )
-        client = self._client_label(context)
+        client_name, client_version = self._client_fields(context)
         status, is_error, error, result_obj = "success", False, None, None
         t0 = time.perf_counter()
         try:
@@ -241,13 +270,6 @@ class TelemetryMiddleware(Middleware):
         finally:
             try:
                 dur_ms = (time.perf_counter() - t0) * 1000.0
-                header = None
-                # No await between the check and the set, so concurrent calls
-                # on one loop cannot double-announce; on a failed write the
-                # flag is cleared so a later call retries the header.
-                if not self._announced:
-                    self._announced = True
-                    header = self._build_run_start()
                 record = self._build_record(
                     context.message.name,
                     goal,
@@ -256,15 +278,21 @@ class TelemetryMiddleware(Middleware):
                     status,
                     is_error,
                     error,
-                    client,
-                    dur_ms,
+                    client_name=client_name,
+                    client_version=client_version,
+                    dur_ms=dur_ms,
                 )
                 if rescued:
                     record["input_rescued"] = True
+                header = (
+                    self._build_run_start()
+                    if self._since_header >= HEADER_INTERVAL_RECORDS
+                    else None
+                )
 
                 def _write() -> None:
                     # One sync call writes header-then-record so the header
-                    # always precedes its session's first record on disk.
+                    # always precedes the record it anchors on disk.
                     if header is not None:
                         self.logger.write(header)
                     self.logger.write(record)
@@ -272,12 +300,15 @@ class TelemetryMiddleware(Middleware):
                 # Offload the blocking write (and any rollover) off the event
                 # loop; the handler's own lock keeps each append atomic across
                 # worker threads.
-                try:
-                    await anyio.to_thread.run_sync(_write)
-                except Exception:
-                    if header is not None:
-                        self._announced = False
-                    raise
+                await anyio.to_thread.run_sync(_write)
+                # Advance ONLY after the write landed. Anything that raises
+                # above — including a CancelledError, which is a BaseException
+                # and escapes both excepts — leaves the counter untouched, so
+                # the next call re-emits rather than losing the header for the
+                # whole run. Two concurrent calls can both see the header as
+                # due and write it twice; harmless, because the header is a
+                # constant and every emission is byte-identical.
+                self._since_header = 1 if header is not None else self._since_header + 1
             except Exception:  # noqa: BLE001 - logging must never break the call
                 pass
 
@@ -317,15 +348,26 @@ class TelemetryMiddleware(Middleware):
 
         Carries what per-call records dropped in v2 (transport, result mode)
         plus server identity and the optional experiment tag — so A/B runs
-        (skill on/off, server build) are self-describing. Takes no context: a
-        header field must be TRUE FOR THE WHOLE RUN, and client identity is not
-        (one process can serve several clients), so that is stamped per record.
-        ``pid`` is here to correlate a run with the server's own stderr log.
+        (skill on/off, server build) are self-describing. Takes no context and
+        reads no clock: EVERY field must be true for the whole run, which is
+        what makes the periodic re-emission idempotent. Client identity is not
+        such a field (one process can serve several clients), so it is stamped
+        per record instead.
+
+        ``pid`` distinguishes concurrent server processes appending to one
+        COLLECTION_LOG_PATH — the multi-worker case .env.sample warns about —
+        and lets an operator match a run against OS process tooling. It is NOT
+        a join key for the server's own stderr: nothing here configures a log
+        format that emits a pid.
         """
         header: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "record": "run_start",
-            "ts": datetime.now(UTC).isoformat(),
+            # The RUN's start (process import time), not this write's time —
+            # otherwise the run's only anchor would be "when it was first
+            # used", which on an idle server is hours late and duplicates the
+            # first call record's own ts.
+            "ts": _RUN_STARTED_AT,
             "run_id": self.run_id,
             "pid": os.getpid(),
             "transport": self.transport,
@@ -339,28 +381,65 @@ class TelemetryMiddleware(Middleware):
             header["tag"] = self.run_tag
         return header
 
-    @staticmethod
-    def _client_label(context: MiddlewareContext[Any]) -> str | None:
-        """Best-effort ``"name/version"`` from MCP initialize; never raises.
+    def _client_fields(
+        self, context: MiddlewareContext[Any]
+    ) -> tuple[str | None, str | None]:
+        """Best-effort ``(name, version)`` from MCP initialize; never raises.
 
-        Read per call rather than once per run, because the identity belongs to
-        the caller, not to the process. Returns None whenever the handshake is
-        not reachable — which a sessionless transport makes routine, so an
-        absent value is expected, not a defect.
+        Kept as TWO fields rather than one ``"name/version"`` string: a client
+        whose own name contains a slash (``acme/agent-sdk``) makes the joined
+        form unsplittable, and a missing version becomes indistinguishable from
+        a name that simply has no separator.
+
+        Read per call, because the identity belongs to the caller and not to
+        the process, but sanitized through a cache — the values are caller-
+        supplied, so they get the same redact-and-bound treatment as every
+        other logged field, and that work should not repeat once per call for
+        the one client a stdio run ever sees. Returns ``(None, None)`` whenever
+        the handshake is unreachable, which a sessionless transport makes
+        routine: absent is expected here, not a defect.
         """
         try:
             fc = getattr(context, "fastmcp_context", None)
             session = getattr(getattr(fc, "request_context", None), "session", None)
             info = getattr(getattr(session, "client_params", None), "clientInfo", None)
             if info is None:
-                return None
-            name = getattr(info, "name", None)
-            if not isinstance(name, str) or not name:
-                return None
-            version = getattr(info, "version", None)
-            return f"{name}/{version}" if isinstance(version, str) and version else name
+                return None, None
+            raw_name = getattr(info, "name", None)
+            raw_version = getattr(info, "version", None)
+            key = (
+                raw_name if isinstance(raw_name, str) else None,
+                raw_version if isinstance(raw_version, str) else None,
+            )
+            if key[0] is None:
+                return None, None
+            cached = self._client_cache.get(key)
+            if cached is None:
+                cached = (
+                    self._sanitize_client(key[0]),
+                    self._sanitize_client(key[1]),
+                )
+                # An unbounded cache would be a memory leak on a hostile or
+                # buggy client that varies its name per connection.
+                if len(self._client_cache) < 64:
+                    self._client_cache[key] = cached
+            return cached
         except Exception:  # noqa: BLE001 - identity is best-effort
+            return None, None
+
+    @staticmethod
+    def _sanitize_client(value: str | None) -> str | None:
+        """Redact + bound one client identity string.
+
+        clientInfo comes straight off the handshake, i.e. from the caller, and
+        .env.sample promises every field is capped and Bearer/JWT-scrubbed.
+        Capped at 128 rather than max_field_bytes: this rides on EVERY record,
+        so a client that sends kilobytes must not eat the rotation budget.
+        """
+        if not value:
             return None
+        out, _ = bounded_redact(value, 128)
+        return out if isinstance(out, str) and out else None
 
     @staticmethod
     def _server_version() -> str | None:
@@ -563,7 +642,12 @@ class TelemetryMiddleware(Middleware):
         status: str,
         is_error: bool,
         error: Any,
-        client: str | None,
+        # Keyword-only: these took over the positional slot that used to hold
+        # session_id, and a stale str argument would otherwise be accepted
+        # silently and logged as a client name.
+        *,
+        client_name: str | None = None,
+        client_version: str | None = None,
         dur_ms: float,
     ) -> dict[str, Any]:
         field_bytes = self.logger.max_field_bytes
@@ -622,8 +706,10 @@ class TelemetryMiddleware(Middleware):
         # Omitted rather than null when the handshake is unreachable: absent is
         # the common case on a sessionless transport, and a null on every line
         # would cost more than it says.
-        if client:
-            record["client"] = client
+        if client_name:
+            record["client_name"] = client_name
+        if client_version:
+            record["client_version"] = client_version
         record.update(outcome)
         return record
 
