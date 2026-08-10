@@ -1,0 +1,51 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "sas-mcp-server.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # The MCP endpoint. No rewrite — the app serves this path natively,
+          # so it is forwarded unchanged.
+          - path: {{ .Values.ingress.mcpPath }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+          {{- if .Values.ingress.oauthEnabled }}
+          # OAuth 2.0 endpoints. These are siblings of the MCP path at the HOST
+          # ROOT, not children of it — the paths are fixed by the library, and
+          # the server advertises exactly these URLs in its discovery
+          # documents. All of them must reach this service or the browser PKCE
+          # flow breaks. Confirm nothing else on this host already claims them.
+          {{- range .Values.ingress.oauthPaths }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+          {{- end }}
+          {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}

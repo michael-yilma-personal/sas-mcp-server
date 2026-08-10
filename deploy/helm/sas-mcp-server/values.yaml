@@ -1,0 +1,195 @@
+# Defaults target the Zeus s2 environment; override per deployment.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/sassoftware/sas-mcp-server
+  # Defaults to .Chart.appVersion when empty. Prefer a digest in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# SAS Viya connection
+# ---------------------------------------------------------------------------
+viya:
+  # The Viya environment this server talks to.
+  endpoint: https://viya4-s2.zeus.sashq-d.openstack.sas.com
+  # SASLogon OAuth client id. Its registered redirect URI must include
+  # <ingress.url>/auth/callback or the browser PKCE flow dead-ends.
+  clientId: sas-mcp-gerdaw
+  # false for a self-signed Viya certificate.
+  sslVerify: false
+  computeContextName: SAS Job Execution compute context
+  # Set to use a fixed compute session instead of context-backed sessions.
+  computeSessionId: ""
+
+# ---------------------------------------------------------------------------
+# MCP server behaviour
+# ---------------------------------------------------------------------------
+server:
+  # Advertised to MCP clients during the initialize handshake.
+  name: SAS Viya MCP Server (Zeus s2)
+  port: 8134
+  # Tool tiers to expose, e.g. "0-4" or "0,1,7". Empty = all 75 tools.
+  tiers: ""
+  # Expose only tools that neither change server-side state nor cause
+  # server-side work (43 of 75). Composes with `tiers`.
+  readOnly: false
+  # Accept a raw Viya token as a bearer, alongside the PKCE flow. Lets scripted
+  # callers that already hold a Viya token skip the browser dance.
+  allowRawBearer: true
+  # Bypass SASLogon entirely (only for Viya APIs exposed without auth).
+  authEnabled: true
+
+# ---------------------------------------------------------------------------
+# Signing key
+#
+# The server derives its JWT signing key from this deterministically, so all
+# replicas sharing it issue compatible tokens.
+#
+# LEAVING THIS UNSET IS NOT SAFE: the server falls back to the literal string
+# "default", which is published in an open-source repo, so anyone can derive
+# the key and forge tokens. Either create the secret out of band (recommended)
+# or set `signingKey.value`.
+#
+#   kubectl -n llm create secret generic sas-mcp-server \
+#     --from-literal=signing-key="$(openssl rand -base64 32)"
+# ---------------------------------------------------------------------------
+signingKey:
+  # Reference an existing secret (recommended — keeps the key out of values).
+  existingSecret: sas-mcp-server
+  existingSecretKey: signing-key
+  # Or have the chart create the secret. Mutually exclusive with the above;
+  # if set, this wins. Avoid committing a real value.
+  value: ""
+
+# ---------------------------------------------------------------------------
+# Ingress
+#
+# The MCP endpoint lands at https://<host><mcpPath>. The OAuth endpoints are
+# siblings of it at the HOST ROOT, not children — the paths are fixed by the
+# library, so they are listed explicitly under `oauthPaths` and every one of
+# them must reach this service or the PKCE flow breaks.
+#
+# Before enabling, confirm nothing else on this host already serves those
+# paths. Viya's own OAuth is under /SASLogon/oauth/*, so they should be free.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: viya4-s2.zeus.sashq-d.openstack.sas.com
+  mcpPath: /mcp
+  tls:
+    enabled: true
+    secretName: llm-tls-certs
+  # Set false if the browser PKCE flow is not needed — e.g. every client passes
+  # a Viya token directly with server.allowRawBearer=true. That collapses the
+  # ingress to the single mcpPath rule and claims nothing at the host root.
+  oauthEnabled: true
+  oauthPaths:
+    - /.well-known/oauth-protected-resource/mcp
+    - /.well-known/oauth-authorization-server
+    - /authorize
+    - /token
+    - /register
+    - /consent
+    - /auth/callback
+  annotations:
+    # MCP streamable HTTP holds long-lived connections and streams responses.
+    # nginx's 60s default read timeout would cut a long SAS execution mid-call;
+    # buffering would stall streamed output until the response completed.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # upload_file / upload_data send file bodies through this path.
+    nginx.ingress.kubernetes.io/proxy-body-size: 100m
+
+service:
+  type: ClusterIP
+  port: 8134
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Persistence for OAuth client registrations
+#
+# FastMCP stores dynamically registered OAuth clients in an encrypted SQLite
+# database under this path. With emptyDir they are lost on every restart and
+# clients must re-register; a PVC keeps them. A volume of some kind is REQUIRED
+# whenever readOnlyRootFilesystem is true.
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  mountPath: /app/.local/share/fastmcp
+  # emptyDir | pvc
+  type: emptyDir
+  pvc:
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# ---------------------------------------------------------------------------
+# Opt-in usage telemetry (default OFF). See the repo README for the privacy
+# notes — the log records tool inputs and the model's stated goal.
+# ---------------------------------------------------------------------------
+telemetry:
+  enabled: false
+  logPath: /var/log/sas-mcp/tool-usage.log
+  # never | failures | always
+  logResults: failures
+  requireGoal: true
+  # Telemetry writes to a file; give it somewhere writable.
+  persistence:
+    type: emptyDir
+    pvc:
+      size: 2Gi
+      storageClass: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# The lifespan issues one DELETE per warm compute session on shutdown; allow
+# time for that rather than leaking sessions on every rollout.
+terminationGracePeriodSeconds: 60
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100 # `sas` in the published image
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables, e.g. [{name: FOO, value: "bar"}]
+extraEnv: []

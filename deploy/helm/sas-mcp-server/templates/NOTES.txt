@@ -1,0 +1,44 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as {{ include "sas-mcp-server.fullname" . }}.
+
+{{ if .Values.ingress.enabled -}}
+MCP endpoint:
+    {{ include "sas-mcp-server.baseUrl" . }}{{ .Values.ingress.mcpPath }}
+
+Point an MCP client at that URL. It will discover the OAuth endpoints on its
+own from {{ include "sas-mcp-server.baseUrl" . }}/.well-known/oauth-protected-resource{{ .Values.ingress.mcpPath }}
+{{- else -}}
+Ingress is disabled. Reach the server in-cluster at:
+    http://{{ include "sas-mcp-server.fullname" . }}:{{ .Values.service.port }}/mcp
+{{- end }}
+
+Check it is up:
+    kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "sas-mcp-server.fullname" . }}
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sas-mcp-server.fullname" . }} 8134:{{ .Values.service.port }}
+    curl -s localhost:8134/health
+
+{{ if and .Values.ingress.enabled .Values.ingress.oauthEnabled -}}
+STILL TO DO — the browser sign-in fails without this:
+
+  Register this redirect URI on SASLogon client "{{ .Values.viya.clientId }}":
+      {{ include "sas-mcp-server.baseUrl" . }}/auth/callback
+{{- end }}
+{{ if not .Values.signingKey.existingSecret }}{{ if not .Values.signingKey.value }}
+WARNING: no signing key configured. The server will fall back to the literal
+string "default", which is published in an open-source repo — anyone can derive
+the key and forge tokens. Create one and upgrade:
+
+    kubectl -n {{ .Release.Namespace }} create secret generic {{ include "sas-mcp-server.fullname" . }} \
+      --from-literal=signing-key="$(openssl rand -base64 32)"
+{{- end }}{{- end }}
+{{- if eq .Values.persistence.type "emptyDir" }}
+
+NOTE: OAuth client registrations are on an emptyDir, so they are lost on every
+restart and clients must re-register. Set persistence.type=pvc to keep them.
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }}. OAuth registrations are stored per pod and
+warm Viya compute sessions are cached in process, so replicas diverge — a
+client registered on one pod is unknown to the others. Use 1 replica unless
+you have added a shared client_storage backend.
+{{- end }}

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sas-mcp-server.fullname" . }}
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+data:
+  VIYA_ENDPOINT: {{ .Values.viya.endpoint | quote }}
+  # MUST be externally reachable — the server advertises its OAuth endpoints
+  # relative to this.
+  MCP_BASE_URL: {{ include "sas-mcp-server.baseUrl" . | quote }}
+  CLIENT_ID: {{ .Values.viya.clientId | quote }}
+  SSL_VERIFY: {{ .Values.viya.sslVerify | quote }}
+  HOST_PORT: {{ .Values.server.port | quote }}
+  COMPUTE_CONTEXT_NAME: {{ .Values.viya.computeContextName | quote }}
+  MCP_SERVER_NAME: {{ .Values.server.name | quote }}
+  ALLOW_RAW_BEARER: {{ .Values.server.allowRawBearer | quote }}
+  VIYA_AUTH: {{ .Values.server.authEnabled | quote }}
+  MCP_READ_ONLY: {{ .Values.server.readOnly | quote }}
+  {{- with .Values.server.tiers }}
+  MCP_TIERS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.viya.computeSessionId }}
+  COMPUTE_SESSION_ID: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.enabled }}
+  COLLECTION_MODE: "true"
+  COLLECTION_LOG_PATH: {{ .Values.telemetry.logPath | quote }}
+  COLLECTION_LOG_RESULTS: {{ .Values.telemetry.logResults | quote }}
+  COLLECTION_REQUIRE_GOAL: {{ .Values.telemetry.requireGoal | quote }}
+  {{- end }}
