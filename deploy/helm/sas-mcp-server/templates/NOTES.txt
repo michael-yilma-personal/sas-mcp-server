@@ -38,8 +38,9 @@ heuristic and does not detect PII in data values. Tell your users.
   log:     {{ .Values.telemetry.logPath }}
   results: {{ .Values.telemetry.logResults }}
 {{- if not (has (toString .Values.telemetry.logResults) (list "true" "false")) }}
-  NOTE: "{{ .Values.telemetry.logResults }}" needs the schema-v3 build. On 1.8.0 it is
-  parsed as a boolean and falls back to shape-only. Use "true"/"false" there.
+  NOTE: "{{ .Values.telemetry.logResults }}" needs a schema-v3 image (merged to main,
+  not yet released). Image {{ .Values.image.tag | default .Chart.AppVersion }} parses it as a boolean and falls
+  back to shape-only. Use "true"/"false" until image.tag is a v3 build.
 {{- end }}
 {{- if eq .Values.telemetry.persistence.type "emptyDir" }}
   NOTE: the log is on an emptyDir — it is DISCARDED when the pod restarts.

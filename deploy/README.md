@@ -231,14 +231,18 @@ a shared deployment it is collecting other people's work, so tell them first.
 Nothing is transmitted anywhere: the log stays on the volume until someone
 deliberately copies it off.
 
-**One version trap.** `telemetry.logResults` is documented elsewhere in this
-repo as a tri-state (`never` / `failures` / `always`), but that is the
-**schema-v3** build (PR #40, unmerged). The deployed **1.8.0** image parses the
-same variable with `env_bool`, which accepts only `true/1/yes/on` and
-`false/0/no/off` and silently falls back to its default for anything else — so
-`failures` there quietly means shape-only. `"true"` and `"false"` mean the same
-thing on both builds, so the chart defaults to `"false"` and the install notes
-warn if you set a v3-only value.
+**One version trap.** `telemetry.logResults` is a tri-state (`never` /
+`failures` / `always`) as of the **schema-v3** work, which is merged to `main`
+(#40) but **not yet in a released image** — `image.tag` still defaults to
+`1.8.0`. The 1.8.0 image parses the same variable with `env_bool`, which accepts
+only `true/1/yes/on` and `false/0/no/off` and silently falls back to its default
+for anything else, so `failures` there quietly means shape-only. `"true"` and
+`"false"` mean the same thing on both builds, so the chart defaults to `"false"`
+and the install notes warn if you set a v3-only value.
+
+Once a release ships a v3 image and `image.tag` is bumped, `failures` becomes
+the useful setting — full result bodies only for calls that errored or whose
+tool declared a failure — and the warning stops applying.
 
 ---
 

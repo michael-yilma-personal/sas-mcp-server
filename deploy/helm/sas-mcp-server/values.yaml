@@ -181,12 +181,14 @@ persistence:
 telemetry:
   enabled: false
   logPath: /var/log/sas-mcp/tool-usage.log
-  # VERSION-DEPENDENT. The tri-state (never | failures | always) needs the
-  # schema-v3 build; v1.8.0 parses this with env_bool, which accepts only
+  # VERSION-DEPENDENT. The tri-state (never | failures | always) landed with
+  # schema v3 (#40, merged) but is NOT in a released image yet — image.tag still
+  # defaults to 1.8.0, which parses this with env_bool: it accepts only
   # true/1/yes/on and false/0/no/off and silently falls back to its default for
-  # anything else — so "failures" there means shape-only, not what it says.
-  # "true"/"false" mean the same thing on BOTH builds, so they are the safe
-  # values until the v3 image ships.
+  # anything else, so "failures" there means shape-only, not what it says.
+  # "true"/"false" mean the same thing on BOTH builds, so they stay the safe
+  # values until image.tag points at a v3 image — then "failures" is the one
+  # worth setting.
   logResults: "false"
   requireGoal: true
   # Telemetry writes to a file; give it somewhere writable.
