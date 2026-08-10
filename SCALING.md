@@ -21,8 +21,9 @@ slightly deflating answer: *almost nothing, and mostly memory not CPU*. The
 question that matters is **how much Viya compute capacity the user population
 needs**, and that is set by a formula in [Sizing](#sizing) below.
 
-One thing does need changing on the MCP pod, and it is not driven by user count:
-the **512Mi memory limit is too tight for a single large report export**.
+One thing did need changing on the MCP pod, and it was not driven by user count:
+the original **512Mi memory limit was too tight for a single large report
+export**. That is now raised to 1Gi and applied.
 
 ---
 
@@ -139,9 +140,9 @@ already has no CPU limit — keep it that way.
 
 ---
 
-## The one change that is actually urgent
+## The one change that was actually urgent (now applied)
 
-**Raise the memory limit from 512Mi.** This is not about user count.
+**The memory limit was raised from 512Mi to 1Gi.** This is not about user count.
 
 `MAX_EXPORT_INLINE_BYTES` defaults to **25 MiB**: `export_report` returns a
 binary export inline as an embedded resource. That payload gets base64-encoded
@@ -174,7 +175,7 @@ session) than for capacity.
 Scaling out is still blocked by the two issues in `K8S-DEPLOYMENT.md`, and both
 are code changes rather than configuration:
 
-1. **OAuth client registrations** are a per-pod SQLite store. `OAuthProxy` takes
+1. **OAuth client registrations** are a per-pod file-tree store. `OAuthProxy` takes
    a `client_storage=` argument; wiring it to Redis would fix this.
 2. **The compute-session cache** is in-process, so the same user landing on a
    different pod creates a second Viya session — which is the expensive resource,

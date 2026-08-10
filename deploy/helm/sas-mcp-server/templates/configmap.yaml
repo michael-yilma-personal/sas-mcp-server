@@ -15,10 +15,15 @@ data:
   COMPUTE_CONTEXT_NAME: {{ .Values.viya.computeContextName | quote }}
   MCP_SERVER_NAME: {{ .Values.server.name | quote }}
   ALLOW_RAW_BEARER: {{ .Values.server.allowRawBearer | quote }}
+  ALLOW_LOCAL_FILE_UPLOAD: {{ .Values.server.allowLocalFileUpload | quote }}
   VIYA_AUTH: {{ .Values.server.authEnabled | quote }}
   MCP_READ_ONLY: {{ .Values.server.readOnly | quote }}
-  {{- with .Values.server.tiers }}
-  MCP_TIERS: {{ . | quote }}
+  {{- /* toString, NOT `with`: Go templates treat the integer 0 as false, so
+         `--set server.tiers=0` would drop this key entirely and the server
+         would fall back to registering EVERY tier. */}}
+  {{- $tiers := .Values.server.tiers | toString }}
+  {{- if ne $tiers "" }}
+  MCP_TIERS: {{ $tiers | quote }}
   {{- end }}
   {{- with .Values.viya.computeSessionId }}
   COMPUTE_SESSION_ID: {{ . | quote }}

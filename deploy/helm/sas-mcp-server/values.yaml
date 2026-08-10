@@ -21,8 +21,12 @@ viya:
   # SASLogon OAuth client id. Its registered redirect URI must include
   # <ingress.url>/auth/callback or the browser PKCE flow dead-ends.
   clientId: sas-mcp-gerdaw
-  # false for a self-signed Viya certificate.
-  sslVerify: false
+  # Matches the application default (verify). Set false ONLY for a self-signed
+  # Viya certificate — it monkey-patches httpx process-wide with
+  # check_hostname=False / CERT_NONE, so the OAuth token exchange (carrying the
+  # user's authorization code and issued Viya token) also stops verifying.
+  # The Zeus s2 environment needs false; see values-zeus-s2.yaml.
+  sslVerify: true
   computeContextName: SAS Job Execution compute context
   # Set to use a fixed compute session instead of context-backed sessions.
   computeSessionId: ""
@@ -41,7 +45,23 @@ server:
   readOnly: false
   # Accept a raw Viya token as a bearer, alongside the PKCE flow. Lets scripted
   # callers that already hold a Viya token skip the browser dance.
+  #
+  # KNOW WHAT THIS ACCEPTS: the fallback verifies against
+  # JWTVerifier(jwks_uri=..., audience=[]) with no required scopes, so ANY JWT
+  # that this Viya's SASLogon signed is a full MCP credential — including one a
+  # user minted with `sas-viya auth login` for CLI work, or one issued to an
+  # unrelated SASLogon client. There is no client registration and no consent
+  # screen on this path. Set false to require the PKCE flow instead.
   allowRawBearer: true
+  # Let the server read files off ITS OWN disk as an upload source
+  # (upload_file/upload_data `file_path`). Default false here and true in the
+  # application, deliberately: in a container the server's disk is the pod, so
+  # `file_path` can only read the pod's own filesystem — /proc/self/environ
+  # (which holds MCP_SIGNING_KEY), the ServiceAccount token, the OAuth store.
+  # It reads any path with no allowlist. Nothing legitimate is lost: `content`,
+  # `url` and the upload_inline_data tool all still work, and `file_path` was
+  # designed for stdio mode where the server's disk IS the user's machine.
+  allowLocalFileUpload: false
   # Bypass SASLogon entirely (only for Viya APIs exposed without auth).
   authEnabled: true
 
@@ -61,7 +81,10 @@ server:
 # ---------------------------------------------------------------------------
 signingKey:
   # Reference an existing secret (recommended — keeps the key out of values).
-  existingSecret: sas-mcp-server
+  # Deliberately EMPTY by default: a non-empty default would make the chart's
+  # `required` guard and the NOTES warning unreachable, so an install with no
+  # secret would look successful and leave the pod in CreateContainerConfigError.
+  existingSecret: ""
   existingSecretKey: signing-key
   # Or have the chart create the secret. Mutually exclusive with the above;
   # if set, this wins. Avoid committing a real value.
@@ -82,7 +105,16 @@ ingress:
   enabled: true
   className: nginx
   host: viya4-s2.zeus.sashq-d.openstack.sas.com
+  # FIXED, not a knob. mcp_server.py does `app = mcp.http_app()` with no path
+  # argument, so the app serves /mcp and no env var can move it; pointing the
+  # ingress elsewhere would just 404. The chart fails the render rather than
+  # let you set a value that silently cannot work.
   mcpPath: /mcp
+  # Externally reachable base URL. Normally derived from `host` + TLS; set this
+  # only when the ingress is disabled and clients reach the Service some other
+  # way (a parent gateway, a port-forward). Never leave it as localhost for a
+  # cluster deployment — every OAuth endpoint is advertised relative to it.
+  baseUrlOverride: ""
   tls:
     enabled: true
     secretName: llm-tls-certs
@@ -116,10 +148,12 @@ service:
 # ---------------------------------------------------------------------------
 # Persistence for OAuth client registrations
 #
-# FastMCP stores dynamically registered OAuth clients in an encrypted SQLite
-# database under this path. With emptyDir they are lost on every restart and
+# FastMCP stores dynamically registered OAuth clients as a Fernet-encrypted
+# file tree under this path. With emptyDir they are lost on every restart and
 # clients must re-register; a PVC keeps them. A volume of some kind is REQUIRED
-# whenever readOnlyRootFilesystem is true.
+# whenever readOnlyRootFilesystem is true — OAuthProxy mkdirs the directory at
+# import time, so without one the container crash-loops at startup. The chart
+# fails the render on that combination rather than let you find out live.
 # ---------------------------------------------------------------------------
 persistence:
   enabled: true

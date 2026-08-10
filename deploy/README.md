@@ -152,7 +152,7 @@ Then point an MCP client at `https://viya4-s2.zeus.sashq-d.openstack.sas.com/mcp
 **`replicas: 1`.** Two things break at more than one replica, neither fixable in
 a manifest:
 
-- OAuth client registrations live in a per-pod SQLite store, so a client
+- OAuth client registrations live in a per-pod file-tree store, so a client
   registered on pod A is unknown to pod B. `OAuthProxy` accepts a
   `client_storage=` argument for a shared backend, but this repo does not wire
   it yet.
@@ -163,10 +163,13 @@ a manifest:
 The chart warns if you raise it anyway.
 
 **`readOnlyRootFilesystem: true` plus a state volume.** The OAuth store needs a
-writable path. Without the volume the write fails at *runtime* — the pod starts
-healthy and OAuth breaks later. With `emptyDir` (the default) registrations are
-lost on every restart and clients re-register; `persistence.type=pvc` keeps
-them.
+writable path, and it is needed *at import*: `OAuthProxy.__init__` mkdirs its
+storage directory, and `config.py` constructs the proxy at module scope. Without
+the volume the container **crash-loops at startup** with
+`OSError: [Errno 30] Read-only file system` — it does not start healthy and fail
+later. The chart fails the render on that combination rather than let you find
+out live. With `emptyDir` (the default) registrations are lost on every restart
+and clients re-register; `persistence.type=pvc` keeps them.
 
 **`terminationGracePeriodSeconds: 60`.** Shutdown issues one `DELETE` per warm
 compute session. Measured 2.4 s with none cached; with many warm users this

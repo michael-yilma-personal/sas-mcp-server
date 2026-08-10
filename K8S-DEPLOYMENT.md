@@ -95,7 +95,7 @@ when `MCP_BASE_URL` is not localhost, so this cannot be deployed by accident.
 
 **Severity: high.**
 
-FastMCP's `OAuthProxy` defaults to an encrypted SQLite `DiskStore` for dynamically
+FastMCP's `OAuthProxy` defaults to a Fernet-encrypted file tree (`FileTreeStore`) for dynamically
 registered OAuth clients, at `settings.home / "oauth-proxy"`. In the container that
 resolves to a real, writable path:
 
@@ -114,8 +114,11 @@ consequences in k8s, none of them visible until they bite:
 - **It is per-pod.** With `replicas > 1`, a client registered against pod A is unknown to
   pod B, so the OAuth dance fails depending on which pod the request lands on.
 - **It breaks under `readOnlyRootFilesystem: true`** — a standard hardening baseline, and
-  part of the Pod Security "restricted" profile. The write fails and OAuth breaks at
-  runtime, not at startup.
+  part of the Pod Security "restricted" profile. `OAuthProxy.__init__` mkdirs its storage
+  directory and `config.py` builds the proxy at module scope, so the failure lands at
+  *import*: the container crash-loops with `OSError: [Errno 30] Read-only file system`.
+  (An earlier revision of this document said it failed later at runtime with a healthy
+  pod. That was wrong — it never starts.)
 
 **Fix (single replica):** mount a volume at `/app/.local/share/fastmcp` — an `emptyDir`
 restores compatibility with a read-only root filesystem; a PVC additionally survives
@@ -230,6 +233,8 @@ wait for Viya to reap them.
 | `VIYA_ENDPOINT` | *(required)* | Startup fails without it — good, it is a `ConfigError`, not a silent default. |
 | `SSL_VERIFY` | `true` | Self-signed Viya needs `false`; see the FastMCP 4 caveat in `FASTMCP-4-IMPACT.md` before relying on it long-term. |
 | `COLLECTION_LOG_PATH` | `~/.sas-mcp-server/tool-usage.log` | Only if telemetry is enabled: writes to the ephemeral layer and needs a volume. Cross-process appends are not coordinated, so one path per pod. |
+| `ALLOW_LOCAL_FILE_UPLOAD` | **`true`** | **Set `false` in any container deployment.** It lets `upload_file`/`upload_data`'s `file_path` source read *the server's own disk* with no allowlist — which in a pod means `/proc/self/environ` (holding `MCP_SIGNING_KEY`), the ServiceAccount token, and the OAuth store, exfiltrated to Viya Files by any authenticated caller. The source exists for stdio mode, where the server's disk *is* the user's machine; in a container it can only read the pod, so nothing legitimate is lost — `content`, `url` and `upload_inline_data` all still work. Absent from `.env.sample`, so it is easy to miss. |
+| `ALLOW_RAW_BEARER` | `false` | If enabled, understand the scope: the fallback verifier uses `audience=[]` with no required scopes, so **any** JWT this Viya's SASLogon signed is a full MCP credential — including tokens minted for other clients — with no client registration and no consent screen. |
 | `MCP_TIERS` / `MCP_READ_ONLY` | all / `false` | Worth setting deliberately for a shared deployment rather than exposing all 75 tools. |
 
 FastMCP also warns on startup: `Using non-secure cookies for development; deploy with

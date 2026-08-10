@@ -46,10 +46,25 @@ heuristic and does not detect PII in data values. Tell your users.
   Set telemetry.persistence.type=pvc to keep it.
 {{- end }}
 {{- end }}
-{{- if eq .Values.persistence.type "emptyDir" }}
+{{- if and .Values.persistence.enabled (eq .Values.persistence.type "emptyDir") }}
 
 NOTE: OAuth client registrations are on an emptyDir, so they are lost on every
 restart and clients must re-register. Set persistence.type=pvc to keep them.
+{{- end }}
+{{- if .Values.signingKey.existingSecret }}
+
+NOTE: the signing key comes from the pre-existing secret "{{ .Values.signingKey.existingSecret }}".
+Changing that secret does NOT restart the pod — env vars from secretKeyRef are
+not refreshed in a running container. After rotating it, run:
+    kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "sas-mcp-server.fullname" . }}
+{{- end }}
+{{- if .Values.server.allowRawBearer }}
+
+NOTE: allowRawBearer is on. ANY JWT signed by this Viya's SASLogon is accepted
+as a full MCP credential — the verifier sets audience=[] with no required
+scopes, so tokens minted for other clients (e.g. `sas-viya auth login`) work
+too, with no client registration and no consent screen. Set
+server.allowRawBearer=false to require the PKCE flow.
 {{- end }}
 {{- if gt (int .Values.replicaCount) 1 }}
 

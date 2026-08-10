@@ -43,10 +43,30 @@ data:
   MCP_SERVER_NAME: SAS Viya MCP Server (Zeus s2)
   # Accept a Viya token passed straight through as a bearer, alongside the PKCE
   # flow. Useful for scripted callers that already hold a Viya token.
+  # NOTE what this accepts: the fallback verifier sets audience=[] with no
+  # required scopes, so ANY JWT this Viya's SASLogon signed works as a full MCP
+  # credential — including tokens minted for other clients. Set "false" to
+  # require the PKCE flow.
   ALLOW_RAW_BEARER: "true"
+  # Refuse to read files off the server's own disk as an upload source.
+  # The application defaults this to TRUE; in a container that is a liability,
+  # because the server's disk is the pod — `file_path` would read
+  # /proc/self/environ (which holds MCP_SIGNING_KEY), the ServiceAccount token,
+  # or the OAuth store, with no allowlist. Nothing legitimate is lost: the
+  # `content` and `url` sources and upload_inline_data all still work.
+  ALLOW_LOCAL_FILE_UPLOAD: "false"
   # Uncomment to narrow the exposed surface:
   # MCP_TIERS: "0-4"
   # MCP_READ_ONLY: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sas-mcp-server
+  namespace: llm
+# The server calls Viya over HTTPS and never touches the Kubernetes API. An API
+# token on disk is readable by anything that can read a path, so do not mount one.
+automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -57,7 +77,7 @@ metadata:
     app: sas-mcp-server
 spec:
   # Keep at 1. Two things break at >1 and neither is fixable in this file:
-  #   * OAuth client registrations live in a per-pod SQLite store, so a client
+  #   * OAuth client registrations live in a per-pod file-tree store, so a client
   #     registered on pod A is unknown to pod B.
   #   * Warm Viya compute sessions are cached in-process, so the same user
   #     hitting a different pod spins up a second session on Viya.
@@ -72,6 +92,8 @@ spec:
       labels:
         app: sas-mcp-server
     spec:
+      serviceAccountName: sas-mcp-server
+      automountServiceAccountToken: false
       # The lifespan issues one DELETE per warm compute session on shutdown;
       # allow time for that rather than leaking sessions on every rollout.
       terminationGracePeriodSeconds: 60
@@ -105,9 +127,10 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # OAuth client registrations (encrypted SQLite). Without this the
-            # pod cannot write them at all under readOnlyRootFilesystem, and
-            # OAuth fails at runtime rather than at startup.
+            # OAuth client registrations (a Fernet-encrypted file tree).
+            # REQUIRED under readOnlyRootFilesystem: OAuthProxy mkdirs this
+            # directory at import time, so without it the container crash-loops
+            # at startup — it does not start healthy and fail later.
             - name: fastmcp-state
               mountPath: /app/.local/share/fastmcp
             - name: tmp
