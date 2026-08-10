@@ -184,6 +184,45 @@ Python service with no such need, so it schedules anywhere. Set
 
 ---
 
+## Usage telemetry (optional, off by default)
+
+The server can log every tool call to a JSONL file — tool name, arguments, the
+model's stated `goal`, status, error, and latency. The chart wires it up; it is
+disabled unless you ask for it:
+
+```sh
+helm upgrade sas-mcp deploy/helm/sas-mcp-server -n llm --reuse-values \
+  --set telemetry.enabled=true \
+  --set telemetry.persistence.type=pvc      # else the log dies with the pod
+```
+
+That sets `COLLECTION_MODE` and friends, and mounts a volume at the log's
+directory. Read it back with:
+
+```sh
+kubectl -n llm exec deploy/sas-mcp-server -- cat /var/log/sas-mcp/tool-usage.log
+```
+
+**Before enabling this on a shared server**, be clear about what it is: the log
+captures the SAS code and queries submitted by *every user of the deployment*,
+not just you, along with the model's stated reason for each call. Redaction
+covers credential-shaped keys, inline Bearer/JWT tokens and the Viya hostname —
+it does **not** detect PII in data values. On a laptop this is self-consent; on
+a shared deployment it is collecting other people's work, so tell them first.
+Nothing is transmitted anywhere: the log stays on the volume until someone
+deliberately copies it off.
+
+**One version trap.** `telemetry.logResults` is documented elsewhere in this
+repo as a tri-state (`never` / `failures` / `always`), but that is the
+**schema-v3** build (PR #40, unmerged). The deployed **1.8.0** image parses the
+same variable with `env_bool`, which accepts only `true/1/yes/on` and
+`false/0/no/off` and silently falls back to its default for anything else — so
+`failures` there quietly means shape-only. `"true"` and `"false"` mean the same
+thing on both builds, so the chart defaults to `"false"` and the install notes
+warn if you set a v3-only value.
+
+---
+
 ## Alternative: everything under `/mcp`
 
 If claiming root paths on the Viya host is unacceptable, the server can instead
@@ -221,7 +260,6 @@ token.
 - `SSL_VERIFY=false` is set for the self-signed Viya certificate. See
   `FASTMCP-4-IMPACT.md` for why that flag needs revisiting before a FastMCP 4
   upgrade — the patch it relies on does not cover FastMCP 4's HTTP client.
-- Telemetry is off by default. Enabling it writes tool inputs and the model's
-  stated goal to disk; read the privacy notes in the repo README first.
+- No live-cluster load or failover testing beyond what `SCALING.md` records.
 - No NetworkPolicy, PodDisruptionBudget, or HPA — an HPA in particular would be
   actively wrong while replicas are capped at 1.

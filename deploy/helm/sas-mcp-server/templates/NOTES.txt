@@ -30,6 +30,22 @@ the key and forge tokens. Create one and upgrade:
     kubectl -n {{ .Release.Namespace }} create secret generic {{ include "sas-mcp-server.fullname" . }} \
       --from-literal=signing-key="$(openssl rand -base64 32)"
 {{- end }}{{- end }}
+{{- if .Values.telemetry.enabled }}
+
+USAGE TELEMETRY IS ON. It records the SAS code and queries submitted, plus the
+model's stated goal, for EVERY user of this server — not just you. Redaction is
+heuristic and does not detect PII in data values. Tell your users.
+  log:     {{ .Values.telemetry.logPath }}
+  results: {{ .Values.telemetry.logResults }}
+{{- if not (has (toString .Values.telemetry.logResults) (list "true" "false")) }}
+  NOTE: "{{ .Values.telemetry.logResults }}" needs the schema-v3 build. On 1.8.0 it is
+  parsed as a boolean and falls back to shape-only. Use "true"/"false" there.
+{{- end }}
+{{- if eq .Values.telemetry.persistence.type "emptyDir" }}
+  NOTE: the log is on an emptyDir — it is DISCARDED when the pod restarts.
+  Set telemetry.persistence.type=pvc to keep it.
+{{- end }}
+{{- end }}
 {{- if eq .Values.persistence.type "emptyDir" }}
 
 NOTE: OAuth client registrations are on an emptyDir, so they are lost on every
