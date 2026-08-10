@@ -148,12 +148,23 @@ telemetry:
       size: 2Gi
       storageClass: ""
 
+# Memory is the binding constraint, and it is driven by transient result buffers
+# rather than by user count — 40 concurrent clients cost only ~23Mi over a 152Mi
+# idle baseline. The limit is sized for MAX_EXPORT_INLINE_BYTES (25 MiB), which
+# export_report returns inline, then base64-encodes (x1.33) and JSON-serializes;
+# at 512Mi that left ~360Mi of headroom and one large export could OOM the pod.
+# An OOM is SIGKILL, so the lifespan never runs and every warm compute session
+# leaks. See SCALING.md.
+#
+# Deliberately NO CPU limit: the workload is bursty and single-threaded, so a
+# limit throttles the event loop and inflates tail latency. Requests alone give
+# it scheduling priority without a ceiling.
 resources:
   requests:
     cpu: 100m
     memory: 256Mi
   limits:
-    memory: 512Mi
+    memory: 1Gi
 
 # The lifespan issues one DELETE per warm compute session on shutdown; allow
 # time for that rather than leaking sessions on every rollout.
