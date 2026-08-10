@@ -95,9 +95,9 @@ def parse_log_results(raw: str | None) -> str:
 
 
 COLLECTION_LOG_RESULTS = parse_log_results(os.getenv("COLLECTION_LOG_RESULTS"))
-# Free-text experiment label stamped into each session_start record — tag A/B
-# runs (skill on/off, server build) so traces are self-describing.
-COLLECTION_SESSION_TAG = os.getenv("COLLECTION_SESSION_TAG", "") or None
+# Free-text experiment label stamped into each run_start record — tag A/B runs
+# (skill on/off, server build) so traces are self-describing.
+COLLECTION_RUN_TAG = os.getenv("COLLECTION_RUN_TAG", "") or None
 
 _logger = logging.getLogger(__name__)
 

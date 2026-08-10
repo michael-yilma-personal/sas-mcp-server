@@ -137,12 +137,13 @@ async def test_on_call_tool_strips_goal_and_logs():
     # underlying tool ran WITHOUT goal
     assert box["received"] == {"text": "ab", "count": 2}
     assert res.structured_content == {"echoed": "abab", "count": 2}
-    # a session_start header precedes the first call record of the session
+    # a run_start header precedes the first call record of the run
     header = logger.records[0]
-    assert header["record"] == "session_start"
+    assert header["record"] == "run_start"
     assert header["transport"] == "stdio"
     assert header["result_mode"] == "always"
-    assert header["session_id"]
+    assert header["run_id"]
+    assert isinstance(header["pid"], int)
     # a well-formed call record was written
     rec = logger.records[-1]
     assert rec["tool"] == "echo"
@@ -151,7 +152,8 @@ async def test_on_call_tool_strips_goal_and_logs():
     assert rec["arguments"]["text"] == "ab"
     assert rec["result"] is not None
     assert rec["result_logged"] is True
-    assert rec["session_id"] == header["session_id"]
+    assert rec["run_id"] == header["run_id"]
+    assert "session_id" not in rec
     assert rec["ts"]
     assert rec["status"] == "success"
     assert isinstance(rec["duration_ms"], float)
@@ -303,22 +305,12 @@ async def test_logger_failure_never_breaks_call():
     assert "goal" not in seen["args"]
 
 
-def test_session_fallback_when_no_context():
-    mw = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
-    ctx = SimpleNamespace(fastmcp_context=None)
-    assert mw._resolve_session(ctx) == mw._proc_session
-
-
-def test_session_fallback_when_session_id_raises():
-    mw = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
-
-    class RaisingFC:
-        @property
-        def session_id(self):
-            raise RuntimeError("no session")
-
-    ctx = SimpleNamespace(fastmcp_context=RaisingFC())
-    assert mw._resolve_session(ctx) == mw._proc_session
+def test_run_id_is_per_middleware_and_stable():
+    """The grouping key is minted per process, not read off the transport."""
+    a = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
+    b = TelemetryMiddleware(FakeLogger(), require_goal=True, transport="stdio")
+    assert a.run_id and a.run_id == a.run_id
+    assert a.run_id != b.run_id
 
 
 def test_extract_output_prefers_structured_then_content():
@@ -454,11 +446,69 @@ async def test_seq_increments_and_args_hash_stable_per_arguments():
     await mw.on_call_tool(_ctx("t", {"goal": "a", "x": 1}), call_next)
     await mw.on_call_tool(_ctx("t", {"goal": "b", "x": 1}), call_next)
     await mw.on_call_tool(_ctx("t", {"goal": "c", "x": 2}), call_next)
-    calls = [r for r in logger.records if r.get("record") != "session_start"]
+    calls = [r for r in logger.records if r.get("record") != "run_start"]
     assert [r["seq"] for r in calls] == [1, 2, 3]
     # goal is excluded from the hash: identical arguments -> identical hash.
     assert calls[0]["args_hash"] == calls[1]["args_hash"]
     assert calls[0]["args_hash"] != calls[2]["args_hash"]
+
+
+@pytest.mark.asyncio
+async def test_grouping_ignores_transport_session_identity():
+    """The whole point of run_id: one run, whatever the transport reports.
+
+    A sessionless transport gives every call a fresh (or absent) session id.
+    Grouping on that would emit a header per call and restart seq at 1 each
+    time, shattering the trace; grouping on run_id must not.
+    """
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="http")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    for n in range(3):
+        ctx = _ctx("t", {"goal": "g"})
+        # A per-request session id, as a sessionless transport would mint.
+        ctx.fastmcp_context = SimpleNamespace(session_id=f"per-request-{n}")
+        await mw.on_call_tool(ctx, call_next)
+
+    headers = [r for r in logger.records if r.get("record") == "run_start"]
+    calls = [r for r in logger.records if r.get("record") != "run_start"]
+    assert len(headers) == 1  # ONE header for the run, not one per call
+    assert [r["seq"] for r in calls] == [1, 2, 3]  # one continuous trace
+    assert {r["run_id"] for r in calls} == {mw.run_id}
+    assert all("session_id" not in r for r in logger.records)
+
+
+@pytest.mark.asyncio
+async def test_client_label_is_per_record_and_omitted_when_unknown():
+    """Client identity belongs to the caller, so it rides on each record."""
+    logger = FakeLogger()
+    mw = TelemetryMiddleware(logger, require_goal=True, transport="http")
+
+    async def call_next(_):
+        return ToolResult(structured_content={"ok": True})
+
+    known = _ctx("t", {"goal": "g"})
+    known.fastmcp_context = SimpleNamespace(
+        request_context=SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=SimpleNamespace(
+                    clientInfo=SimpleNamespace(name="claude-code", version="2.1.0")
+                )
+            )
+        )
+    )
+    await mw.on_call_tool(known, call_next)
+    assert logger.records[-1]["client"] == "claude-code/2.1.0"
+
+    # No handshake reachable (routine when sessionless): omitted, not null.
+    await mw.on_call_tool(_ctx("t", {"goal": "g"}), call_next)
+    assert "client" not in logger.records[-1]
+    # ...and never in the header, which only holds per-run constants.
+    header = next(r for r in logger.records if r.get("record") == "run_start")
+    assert "client" not in header and "client_name" not in header
 
 
 @pytest.mark.asyncio
@@ -562,9 +612,9 @@ async def test_install_enabled_end_to_end_writes_jsonl(monkeypatch, tmp_path):
         for x in log_path.read_text(encoding="utf-8").splitlines()
         if x.strip()
     ]
-    assert len(lines) == 2  # session_start header + one call record
+    assert len(lines) == 2  # run_start header + one call record
     header, rec = lines
-    assert header["record"] == "session_start"
+    assert header["record"] == "run_start"
     assert header["transport"] == "stdio"
     assert rec["tool"] == "echo"
     assert rec["goal"] == "why echo"
@@ -572,7 +622,7 @@ async def test_install_enabled_end_to_end_writes_jsonl(monkeypatch, tmp_path):
     assert rec["arguments"]["text"] == "hi"
     assert rec["result_logged"] is True
     assert rec["status"] == "success"
-    assert rec["session_id"] == header["session_id"]
+    assert rec["run_id"] == header["run_id"]
 
 
 def test_install_disabled_log_path_unusable_returns_none(monkeypatch, tmp_path):

@@ -4,10 +4,22 @@
 """Opt-in collection-mode telemetry middleware for the SAS MCP server.
 
 Injects a required ``goal`` parameter into every published tool schema and logs
-each tool call's input/output/session-id/goal/status/latency to a JSONL file.
+each tool call's input/output/run-id/goal/status/latency to a JSONL file.
 Default OFF; requires ZERO changes to existing tools; works identically in HTTP
-and stdio (it relies solely on ``context.message`` + a guarded
-``context.fastmcp_context.session_id`` and NEVER calls get_http_request).
+and stdio (it relies solely on ``context.message`` and NEVER calls
+get_http_request).
+
+NO MCP SESSION DEPENDENCY. Records are grouped by ``run_id`` — a UUID minted
+once per server process — not by the transport's MCP session id. The protocol
+is moving to a SESSIONLESS era (FastMCP 4 makes it the default), where
+``fastmcp_context.session_id`` is absent or synthesized per request; grouping on
+it would silently shatter every trace into one-call fragments. A process-scoped
+id degrades honestly instead: under stdio one process IS one client, so it is
+exactly as informative as the session id was; under HTTP it groups by server
+process, so per-client separation comes from the per-record ``client`` field or
+a per-process COLLECTION_LOG_PATH rather than from the protocol. Client
+identity is stamped per record, not once in the header, precisely because it is
+NOT a per-run constant once a process serves several clients.
 
 The disk write is offloaded to a worker thread via ``anyio.to_thread`` so the
 blocking file I/O and any RotatingFileHandler rollover never run on the asyncio
@@ -51,10 +63,11 @@ from .usage_logger import GOAL_KEY, UsageLogger, bounded_redact
 
 module_logger = logging.getLogger(__name__)
 
-# v2: session_start header records; per-call seq/args_hash; tool-DECLARED
+# v2: run_start header records; per-call seq/args_hash; tool-DECLARED
 # outcome fields (tool_status/tool_message/...); tri-state result logging
 # (never|failures|always) with per-record result_logged; per-record transport
-# and is_error dropped (constants/derivable — see the session_start record).
+# dropped (a constant — see the run_start record). v1's `session_id` is gone:
+# grouping is by process-scoped `run_id` (see the module docstring).
 SCHEMA_VERSION = 2
 
 # Statuses this repo's tools use to declare a failure AS DATA (the MCP layer
@@ -143,7 +156,7 @@ class TelemetryMiddleware(Middleware):
         require_goal: bool,
         transport: str,
         log_results: bool | str = True,
-        session_tag: str | None = None,
+        run_tag: str | None = None,
     ) -> None:
         self.logger = logger
         self.require_goal = require_goal
@@ -152,14 +165,14 @@ class TelemetryMiddleware(Middleware):
         if isinstance(log_results, bool):
             log_results = "always" if log_results else "never"
         self.result_mode = log_results if log_results in ("always", "failures", "never") else "never"
-        self.session_tag = session_tag
-        # Per-process fallback session id (used only if the transport session
-        # id is unavailable).
-        self._proc_session = str(uuid4())
-        # session_id -> next per-call sequence number; sessions already
-        # announced via a session_start header record.
-        self._seq: dict[str, int] = {}
-        self._announced: set[str] = set()
+        self.run_tag = run_tag
+        # The ONLY grouping key. Minted here, so it is stable for the life of
+        # the process and independent of the MCP session model.
+        self.run_id = str(uuid4())
+        # Next per-call sequence number, and whether this run has already been
+        # announced with a run_start header record.
+        self._seq = 0
+        self._announced = False
         # Lazily resolved tool -> tier map (see _tool_tier).
         self._tool_tiers: dict[str, int] | None = None
 
@@ -210,7 +223,7 @@ class TelemetryMiddleware(Middleware):
         cleaned_ctx = context.copy(
             message=context.message.model_copy(update={"arguments": raw})
         )
-        session_id = self._resolve_session(context)
+        client = self._client_label(context)
         status, is_error, error, result_obj = "success", False, None, None
         t0 = time.perf_counter()
         try:
@@ -229,12 +242,12 @@ class TelemetryMiddleware(Middleware):
             try:
                 dur_ms = (time.perf_counter() - t0) * 1000.0
                 header = None
-                # No await between the check and the add, so concurrent calls
-                # on one loop cannot double-announce; on a failed write the id
-                # is discarded so a later call retries the header.
-                if session_id not in self._announced:
-                    self._announced.add(session_id)
-                    header = self._build_session_start(session_id, context)
+                # No await between the check and the set, so concurrent calls
+                # on one loop cannot double-announce; on a failed write the
+                # flag is cleared so a later call retries the header.
+                if not self._announced:
+                    self._announced = True
+                    header = self._build_run_start()
                 record = self._build_record(
                     context.message.name,
                     goal,
@@ -243,7 +256,7 @@ class TelemetryMiddleware(Middleware):
                     status,
                     is_error,
                     error,
-                    session_id,
+                    client,
                     dur_ms,
                 )
                 if rescued:
@@ -263,7 +276,7 @@ class TelemetryMiddleware(Middleware):
                     await anyio.to_thread.run_sync(_write)
                 except Exception:
                     if header is not None:
-                        self._announced.discard(session_id)
+                        self._announced = False
                     raise
             except Exception:  # noqa: BLE001 - logging must never break the call
                 pass
@@ -299,46 +312,55 @@ class TelemetryMiddleware(Middleware):
                 salvaged = match.group(1)
         return raw, False, salvaged
 
-    def _build_session_start(
-        self, session_id: str, context: MiddlewareContext[Any]
-    ) -> dict[str, Any]:
-        """One header record per session: the constants and the join keys.
+    def _build_run_start(self) -> dict[str, Any]:
+        """One header record per server process: the constants and the join key.
 
         Carries what per-call records dropped in v2 (transport, result mode)
-        plus client/server identity and the optional experiment tag — so A/B
-        runs (skill on/off, server build) are self-describing.
+        plus server identity and the optional experiment tag — so A/B runs
+        (skill on/off, server build) are self-describing. Takes no context: a
+        header field must be TRUE FOR THE WHOLE RUN, and client identity is not
+        (one process can serve several clients), so that is stamped per record.
+        ``pid`` is here to correlate a run with the server's own stderr log.
         """
-        client_name, client_version = self._client_info(context)
         header: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
-            "record": "session_start",
+            "record": "run_start",
             "ts": datetime.now(UTC).isoformat(),
-            "session_id": session_id,
+            "run_id": self.run_id,
+            "pid": os.getpid(),
             "transport": self.transport,
-            "client_name": client_name,
-            "client_version": client_version,
             "server_version": self._server_version(),
             "result_mode": self.result_mode,
             "require_goal": self.require_goal,
             "max_field_bytes": self.logger.max_field_bytes,
             "max_result_bytes": getattr(self.logger, "max_result_bytes", None),
         }
-        if self.session_tag:
-            header["tag"] = self.session_tag
+        if self.run_tag:
+            header["tag"] = self.run_tag
         return header
 
     @staticmethod
-    def _client_info(context: MiddlewareContext[Any]) -> tuple[str | None, str | None]:
-        """Best-effort MCP initialize clientInfo (name, version); never raises."""
+    def _client_label(context: MiddlewareContext[Any]) -> str | None:
+        """Best-effort ``"name/version"`` from MCP initialize; never raises.
+
+        Read per call rather than once per run, because the identity belongs to
+        the caller, not to the process. Returns None whenever the handshake is
+        not reachable — which a sessionless transport makes routine, so an
+        absent value is expected, not a defect.
+        """
         try:
             fc = getattr(context, "fastmcp_context", None)
             session = getattr(getattr(fc, "request_context", None), "session", None)
             info = getattr(getattr(session, "client_params", None), "clientInfo", None)
-            if info is not None:
-                return getattr(info, "name", None), getattr(info, "version", None)
+            if info is None:
+                return None
+            name = getattr(info, "name", None)
+            if not isinstance(name, str) or not name:
+                return None
+            version = getattr(info, "version", None)
+            return f"{name}/{version}" if isinstance(version, str) and version else name
         except Exception:  # noqa: BLE001 - identity is best-effort
-            pass
-        return None, None
+            return None
 
     @staticmethod
     def _server_version() -> str | None:
@@ -371,17 +393,6 @@ class TelemetryMiddleware(Middleware):
             return version("sas-mcp-server")
         except Exception:  # noqa: BLE001
             return None
-
-    def _resolve_session(self, context: MiddlewareContext[Any]) -> str:
-        fc = getattr(context, "fastmcp_context", None)
-        if fc is not None:
-            try:
-                return fc.session_id
-            except RuntimeError:
-                pass
-            except Exception:  # noqa: BLE001 - never let session read break us
-                pass
-        return self._proc_session
 
     def _extract_output(self, result: Any) -> Any:
         # Cap joined text to a bounded prefix so a huge result is not fully
@@ -508,9 +519,14 @@ class TelemetryMiddleware(Middleware):
             canonical = str(arguments)
         return hashlib.sha256(canonical.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
-    def _next_seq(self, session_id: str) -> int:
-        self._seq[session_id] = self._seq.get(session_id, 0) + 1
-        return self._seq[session_id]
+    def _next_seq(self) -> int:
+        """Monotonic call counter for the run — the trace's ordering key.
+
+        Timestamps alone cannot order concurrent calls that share a millisecond,
+        and a sequence per run stays meaningful with no session to count within.
+        """
+        self._seq += 1
+        return self._seq
 
     def _scrub_host(self, text: Any) -> Any:
         """Mask the Viya host in free-text fields (raw HTTP errors embed it)."""
@@ -547,7 +563,7 @@ class TelemetryMiddleware(Middleware):
         status: str,
         is_error: bool,
         error: Any,
-        session_id: str,
+        client: str | None,
         dur_ms: float,
     ) -> dict[str, Any]:
         field_bytes = self.logger.max_field_bytes
@@ -578,8 +594,8 @@ class TelemetryMiddleware(Middleware):
         record = {
             "schema_version": SCHEMA_VERSION,
             "ts": datetime.now(UTC).isoformat(),
-            "session_id": session_id,
-            "seq": self._next_seq(session_id),
+            "run_id": self.run_id,
+            "seq": self._next_seq(),
             "tool": tool,
             # Which tier the tool belongs to, so usage rolls up per tier
             # (None only if a tool was registered outside register_tools).
@@ -603,6 +619,11 @@ class TelemetryMiddleware(Middleware):
         }
         if dur_ms > SUSPECT_DURATION_MS:
             record["duration_suspect"] = True
+        # Omitted rather than null when the handshake is unreachable: absent is
+        # the common case on a sessionless transport, and a null on every line
+        # would cost more than it says.
+        if client:
+            record["client"] = client
         record.update(outcome)
         return record
 
@@ -636,7 +657,7 @@ def install_telemetry(mcp: Any, transport: str) -> TelemetryMiddleware | None:
         require_goal=config.COLLECTION_REQUIRE_GOAL,
         transport=transport,
         log_results=config.COLLECTION_LOG_RESULTS,
-        session_tag=config.COLLECTION_SESSION_TAG,
+        run_tag=config.COLLECTION_RUN_TAG,
     )
     try:
         from urllib.parse import urlparse
