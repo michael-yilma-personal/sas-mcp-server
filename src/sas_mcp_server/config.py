@@ -6,11 +6,10 @@ import os
 import ssl
 
 from dotenv import load_dotenv
-from fastmcp.server.auth import OAuthProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
-from mcp.server.auth.provider import AccessToken
 
-from .env import env_bool
+from .auth import PermissiveOAuthProxy
+from .env import env_bool, parse_log_results
 from .exceptions import ConfigError
 
 load_dotenv()
@@ -57,43 +56,7 @@ COLLECTION_REQUIRE_GOAL = env_bool("COLLECTION_REQUIRE_GOAL", True)
 #            highest-value trace data and rarely carry table rows.
 #   always   — full (capped + redacted) result contents on every call.
 # Back-compat: true/1/yes/on -> always; false/0/no/off -> never.
-
-
-def parse_log_results(raw: str | None) -> str:
-    """Map a COLLECTION_LOG_RESULTS value to never | failures | always.
-
-    Unset defaults to ``failures``. With shape-only results a success and a
-    tool-declared failure are indistinguishable — both log as
-    ``{"_type": "object", "_keys": 7}`` — so a ``never`` default made the
-    highest-value records (why a call failed) unreadable. Failure bodies are
-    also the least likely to carry table rows, so this keeps the privacy
-    posture that matters while making the log diagnostic.
-    """
-    normalized = (raw or "").strip().lower()
-    mapping = {
-        "always": "always",
-        "true": "always",
-        "1": "always",
-        "yes": "always",
-        "on": "always",
-        "failures": "failures",
-        "failure": "failures",
-        "never": "never",
-        "false": "never",
-        "0": "never",
-        "no": "never",
-        "off": "never",
-        "": "failures",  # unset -> the diagnostic default
-    }
-    mode = mapping.get(normalized)
-    if mode is None:
-        logging.getLogger(__name__).warning(
-            "Unrecognized COLLECTION_LOG_RESULTS=%r; falling back to 'never'.", raw
-        )
-        return "never"
-    return mode
-
-
+# Parsing lives in env.py alongside env_bool, which owns the boolean spellings.
 COLLECTION_LOG_RESULTS = parse_log_results(os.getenv("COLLECTION_LOG_RESULTS"))
 # Free-text experiment label stamped into each run_start record — tag A/B runs
 # (skill on/off, server build) so traces are self-describing.
@@ -110,35 +73,6 @@ if _legacy_tag and not COLLECTION_RUN_TAG:
     COLLECTION_RUN_TAG = _legacy_tag
 
 _logger = logging.getLogger(__name__)
-
-
-class PermissiveOAuthProxy(OAuthProxy):
-    """OAuthProxy that optionally accepts raw upstream JWTs.
-
-    When ``ALLOW_RAW_BEARER`` is set, a bearer token that fails the standard
-    MCP JWT swap (because it isn't a proxy-issued JWT) falls through to the
-    configured ``token_verifier``. If the verifier accepts it (i.e. the
-    token is a valid Viya JWT signed by the upstream JWKS), the request
-    proceeds with the raw token used directly as the upstream credential.
-
-    This lets PKCE clients and pre-authenticated programmatic clients hit
-    the same MCP endpoint without conflict — the additive path only kicks
-    in after the standard swap has already failed.
-    """
-
-    async def load_access_token(self, token: str) -> AccessToken | None:
-        validated = await super().load_access_token(token)
-        if validated is not None:
-            return validated
-        if not ALLOW_RAW_BEARER:
-            return None
-        raw = await self._token_validator.verify_token(token)
-        if raw is not None:
-            _logger.info(
-                "Accepted raw bearer token (ALLOW_RAW_BEARER=true); "
-                "bypassing MCP JWT swap"
-            )
-        return raw
 
 if not SSL_VERIFY:
     # Disable SSL verification for self-signed Viya certificates
@@ -221,4 +155,5 @@ viya_auth = PermissiveOAuthProxy(
     forward_pkce=True,
     token_verifier=token_verifier,
     valid_scopes=["openid"],
+    allow_raw_bearer=ALLOW_RAW_BEARER,
 )

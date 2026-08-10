@@ -12,7 +12,7 @@ import httpx
 import pytest
 from mcp.server.auth.provider import AccessToken
 
-from sas_mcp_server import config, mcp_server
+from sas_mcp_server import mcp_server
 from sas_mcp_server.mcp_server import AuthenticationError
 
 
@@ -185,10 +185,12 @@ async def test_http_raw_bearer_accepted_end_to_end():
     verifier = AsyncMock(
         return_value=AccessToken(token="RAWJWT", client_id="test", scopes=["openid"], expires_at=None)
     )
-    # Patch the provider instance wired into the app (mcp_server.viya_auth) —
-    # test_config.py reloads sas_mcp_server.config, rebinding config.viya_auth
-    # to a fresh object the app never sees.
-    with patch.object(config, "ALLOW_RAW_BEARER", True), \
+    # Patch the provider instance wired into the app (mcp_server.viya_auth),
+    # for BOTH the flag and the validator — test_config.py reloads
+    # sas_mcp_server.config, rebinding config.viya_auth to a fresh object the
+    # app never sees. The flag is per-instance state, so it must be set on the
+    # same object the request actually reaches.
+    with patch.object(mcp_server.viya_auth, "_allow_raw_bearer", True), \
          patch.object(mcp_server.viya_auth, "_token_validator") as validator:
         validator.verify_token = verifier
         resp = await _post_initialize("RAWJWT")
@@ -202,7 +204,7 @@ async def test_http_raw_bearer_rejected_when_disabled():
     verifier = AsyncMock(
         return_value=AccessToken(token="RAWJWT", client_id="test", scopes=["openid"], expires_at=None)
     )
-    with patch.object(config, "ALLOW_RAW_BEARER", False), \
+    with patch.object(mcp_server.viya_auth, "_allow_raw_bearer", False), \
          patch.object(mcp_server.viya_auth, "_token_validator") as validator:
         validator.verify_token = verifier
         resp = await _post_initialize("RAWJWT")

@@ -45,11 +45,9 @@ REJECTED ALTERNATIVES (do not "simplify" into these):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -65,111 +63,52 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 # for this submodule, so the import is runtime-correct but flagged; ignore it.
 from fastmcp.tools.base import Tool, ToolResult  # pyright: ignore[reportMissingImports]
 
+from .helpers.telemetry_helpers import (
+    args_hash,
+    classify_error,
+    raw_client_info,
+    rescue_unparsed_input,
+    result_shape,
+    sanitize_client,
+    scrub_host,
+    scrub_host_deep,
+    server_version,
+    tool_outcome,
+)
+from .helpers.telemetry_registry import (
+    GOAL_SCHEMA,
+    HEADER_INTERVAL_RECORDS,
+    SCHEMA_VERSION,
+    SUSPECT_DURATION_MS,
+)
 from .usage_logger import GOAL_KEY, UsageLogger, bounded_redact
 
-module_logger = logging.getLogger(__name__)
+# Re-exported so `from sas_mcp_server.telemetry import ...` keeps working for
+# callers and tests that predate the helpers split.
+__all__ = [
+    "GOAL_SCHEMA",
+    "HEADER_INTERVAL_RECORDS",
+    "SCHEMA_VERSION",
+    "SUSPECT_DURATION_MS",
+    "TelemetryMiddleware",
+    "classify_error",
+    "install_telemetry",
+]
 
-# v2: session_start header records; per-call seq/args_hash; tool-DECLARED
-# outcome fields (tool_status/tool_message/...); tri-state result logging
-# (never|failures|always) with per-record result_logged; per-record transport
-# dropped (a constant — see the header record).
-# v3: `session_id` -> process-scoped `run_id`, `session_start` -> `run_start`
-# (+ pid, re-emitted periodically), and the header's client_name/client_version
-# moved onto every record. The shape is NOT v2-compatible and a v2 log can sit
-# in the same file after an upgrade, so this MUST stay bumped — a reader keying
-# on `run_id` silently drops every v2 line, and a v2 `session_start` header
-# passes a naive `record != "run_start"` filter as if it were a tool call.
-SCHEMA_VERSION = 3
+module_logger = logging.getLogger(__name__)
 
 # ONE run identity per PROCESS, not per middleware instance: two middlewares in
 # one process (a composed/mounted server, a re-import) must not look like two
 # server runs sharing a pid. Stamped at import, which is server startup — so the
 # header's ts answers "when did this server come up", not "when was it first
 # used"; the two can be hours apart on an idle deployment.
+#
+# Everything else that was here — the schema version, failure-status
+# vocabularies, error-classification rules and GOAL_SCHEMA — now lives in
+# helpers/telemetry_registry.py, and the record-shaping functions in
+# helpers/telemetry_helpers.py.
 _RUN_ID = str(uuid4())
 _RUN_STARTED_AT = datetime.now(UTC).isoformat()
-
-# Re-emit the run_start header every N call records. Sized so a header survives
-# in any retained window: at the ~630 bytes/record measured on real logs, the
-# 10 MiB default rotation holds ~16k records, so 1000 gives ~16 anchors per file
-# at ~0.1% overhead. Rotation is not the only truncation — operators tail and
-# split these files too.
-HEADER_INTERVAL_RECORDS = 1000
-
-# Statuses this repo's tools use to declare a failure AS DATA (the MCP layer
-# sees success). Logging them per record turns 'success' rows into an honest
-# funnel — real tool-level failure rates, apply_failed clustering. The pattern
-# groups cover the repo's full status inventory (grep '"status": "' to re-audit
-# when adding tools): *_failed, invalid_*, unknown_*, missing_*, not_*,
-# *_not_found/_not_supported/_not_global, plus the explicit stragglers.
-_TOOL_FAILURE_STATUSES = frozenset(
-    {"error", "export_too_large", "file_unreadable", "file_upload_disabled", "no_active_session"}
-)
-_TOOL_FAILURE_PREFIXES = ("invalid_", "unknown_", "missing_", "not_")
-_TOOL_FAILURE_SUFFIXES = ("_failed", "_not_found", "_not_supported", "_not_global")
-
-
-# A call this long is almost never a real query: it is a hung call, or a host
-# that slept mid-call (perf_counter keeps counting across suspend). Real logs
-# carried entries up to 18.8 HOURS, silently poisoning every latency
-# percentile. Flagged rather than dropped — the outlier itself is a signal.
-SUSPECT_DURATION_MS = 600_000.0
-
-# Free-text exception/HTTP noise -> a low-cardinality class analysis can group
-# by. Ordered: the first match wins, so specific classes precede generic ones.
-_ERROR_TYPE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bValidationError\b", re.I), "validation"),
-    (re.compile(r"\bAuthenticationError\b|\b401\b|\bUnauthorized\b", re.I), "auth"),
-    (re.compile(r"\b403\b|\bForbidden\b", re.I), "permission"),
-    (re.compile(r"getaddrinfo|ConnectError|ConnectTimeout|Name or service not known", re.I), "network"),
-    (re.compile(r"\bTimeout\b|\bTimedOut\b", re.I), "timeout"),
-    (re.compile(r"Server error '5\d\d|\b5\d\d Internal Server Error\b", re.I), "server_error"),
-    (re.compile(r"Client error '4\d\d|\b4\d\d\b", re.I), "client_error"),
-    (re.compile(r"\bToolError\b", re.I), "tool"),
-)
-_HTTP_STATUS_RE = re.compile(r"\b(?:error ')?([45]\d{2})\b")
-
-
-def classify_error(text: Any) -> tuple[str | None, int | None]:
-    """Map an error string to ``(error_type, http_status)``.
-
-    Errors are logged as free text, so counting "how many 404s" or "how many
-    client-side validation failures" otherwise means re-deriving a regex per
-    analysis. Returns ``(None, None)`` when there is no error text.
-    """
-    if not isinstance(text, str) or not text:
-        return None, None
-    status: int | None = None
-    match = _HTTP_STATUS_RE.search(text)
-    if match:
-        try:
-            status = int(match.group(1))
-        except ValueError:
-            status = None
-    for pattern, label in _ERROR_TYPE_RULES:
-        if pattern.search(text):
-            return label, status
-    return "unknown", status
-
-
-def _is_tool_failure_status(status: Any) -> bool:
-    return isinstance(status, str) and (
-        status.startswith(_TOOL_FAILURE_PREFIXES)
-        or status.endswith(_TOOL_FAILURE_SUFFIXES)
-        or status in _TOOL_FAILURE_STATUSES
-    )
-
-
-_GOAL_IN_RAW_RE = re.compile(r'"goal"\s*:\s*"((?:[^"\\]|\\.)*)"')
-
-GOAL_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "description": (
-        "Before the other arguments, state in ONE sentence WHY you are calling "
-        "THIS specific tool for the user's current request — the "
-        "underlying goal it serves."
-    ),
-}
 
 
 class TelemetryMiddleware(Middleware):
@@ -242,7 +181,7 @@ class TelemetryMiddleware(Middleware):
         # arrives wrapped as {"__unparsedToolInput": {"raw": "<json>"}} — the
         # tool's own validation would reject it before the body runs.
         rescued = False
-        raw, rescued, salvage_goal = self._rescue_unparsed_input(raw)
+        raw, rescued, salvage_goal = rescue_unparsed_input(raw)
         # LOAD-BEARING: a real tool's TypeAdapter raises
         # unexpected_keyword_argument if 'goal' leaks through, so strip it
         # from a COPY of the arguments before forwarding.
@@ -314,35 +253,6 @@ class TelemetryMiddleware(Middleware):
 
     # -- helpers ---------------------------------------------------------- #
 
-    @staticmethod
-    def _rescue_unparsed_input(raw: dict[str, Any]) -> tuple[dict[str, Any], bool, Any]:
-        """Unwrap a ``{"__unparsedToolInput": {"raw": "<json>"}}`` envelope.
-
-        Returns (arguments, rescued?, salvaged_goal). When the blob parses to a
-        dict, the call proceeds with the real arguments; when it does not, the
-        goal is still salvaged from the raw text so trace coverage stays whole.
-        """
-        envelope = raw.get("__unparsedToolInput")
-        if set(raw) != {"__unparsedToolInput"} or not isinstance(envelope, dict):
-            return raw, False, None
-        blob = envelope.get("raw")
-        if not isinstance(blob, str):
-            return raw, False, None
-        try:
-            parsed = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            return parsed, True, None
-        match = _GOAL_IN_RAW_RE.search(blob)
-        salvaged = None
-        if match:
-            try:
-                salvaged = json.loads(f'"{match.group(1)}"')
-            except (json.JSONDecodeError, ValueError):
-                salvaged = match.group(1)
-        return raw, False, salvaged
-
     def _build_run_start(self) -> dict[str, Any]:
         """One header record per server process: the constants and the join key.
 
@@ -371,7 +281,7 @@ class TelemetryMiddleware(Middleware):
             "run_id": self.run_id,
             "pid": os.getpid(),
             "transport": self.transport,
-            "server_version": self._server_version(),
+            "server_version": server_version(),
             "result_mode": self.result_mode,
             "require_goal": self.require_goal,
             "max_field_bytes": self.logger.max_field_bytes,
@@ -384,41 +294,21 @@ class TelemetryMiddleware(Middleware):
     def _client_fields(
         self, context: MiddlewareContext[Any]
     ) -> tuple[str | None, str | None]:
-        """Best-effort ``(name, version)`` from MCP initialize; never raises.
+        """Sanitized ``(name, version)`` for the calling client, memoized.
 
-        Kept as TWO fields rather than one ``"name/version"`` string: a client
-        whose own name contains a slash (``acme/agent-sdk``) makes the joined
-        form unsplittable, and a missing version becomes indistinguishable from
-        a name that simply has no separator.
-
-        Read per call, because the identity belongs to the caller and not to
-        the process, but sanitized through a cache — the values are caller-
-        supplied, so they get the same redact-and-bound treatment as every
-        other logged field, and that work should not repeat once per call for
-        the one client a stdio run ever sees. Returns ``(None, None)`` whenever
-        the handshake is unreachable, which a sessionless transport makes
-        routine: absent is expected here, not a defect.
+        Extraction and redaction live in ``telemetry_helpers``; what stays here
+        is the cache, because it is per-middleware state. Read per call — the
+        identity belongs to the caller, not the process — but sanitized once
+        per distinct client, so the redact-and-bound work does not repeat for
+        the single client a stdio run ever sees.
         """
         try:
-            fc = getattr(context, "fastmcp_context", None)
-            session = getattr(getattr(fc, "request_context", None), "session", None)
-            info = getattr(getattr(session, "client_params", None), "clientInfo", None)
-            if info is None:
-                return None, None
-            raw_name = getattr(info, "name", None)
-            raw_version = getattr(info, "version", None)
-            key = (
-                raw_name if isinstance(raw_name, str) else None,
-                raw_version if isinstance(raw_version, str) else None,
-            )
+            key = raw_client_info(context)
             if key[0] is None:
                 return None, None
             cached = self._client_cache.get(key)
             if cached is None:
-                cached = (
-                    self._sanitize_client(key[0]),
-                    self._sanitize_client(key[1]),
-                )
+                cached = (sanitize_client(key[0]), sanitize_client(key[1]))
                 # An unbounded cache would be a memory leak on a hostile or
                 # buggy client that varies its name per connection.
                 if len(self._client_cache) < 64:
@@ -426,52 +316,6 @@ class TelemetryMiddleware(Middleware):
             return cached
         except Exception:  # noqa: BLE001 - identity is best-effort
             return None, None
-
-    @staticmethod
-    def _sanitize_client(value: str | None) -> str | None:
-        """Redact + bound one client identity string.
-
-        clientInfo comes straight off the handshake, i.e. from the caller, and
-        .env.sample promises every field is capped and Bearer/JWT-scrubbed.
-        Capped at 128 rather than max_field_bytes: this rides on EVERY record,
-        so a client that sends kilobytes must not eat the rotation budget.
-        """
-        if not value:
-            return None
-        out, _ = bounded_redact(value, 128)
-        return out if isinstance(out, str) and out else None
-
-    @staticmethod
-    def _server_version() -> str | None:
-        """The running server's version.
-
-        ``importlib.metadata`` reports the *installed distribution* metadata,
-        which goes stale under an editable install — real logs carried
-        ``1.2.0`` while the checkout was several releases newer, making the
-        field worse than useless for correlating behaviour to a version. A
-        source checkout's ``pyproject.toml`` is authoritative when present, so
-        it wins; installed deployments (no pyproject alongside the package)
-        fall through to the metadata.
-        """
-        try:
-            import tomllib
-            from pathlib import Path
-
-            # src/sas_mcp_server/telemetry.py -> repo root
-            pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-            if pyproject.is_file():
-                with pyproject.open("rb") as fh:
-                    found = tomllib.load(fh).get("project", {}).get("version")
-                if isinstance(found, str) and found:
-                    return found
-        except Exception:  # noqa: BLE001 - fall through to installed metadata
-            pass
-        try:
-            from importlib.metadata import version
-
-            return version("sas-mcp-server")
-        except Exception:  # noqa: BLE001
-            return None
 
     def _extract_output(self, result: Any) -> Any:
         # Cap joined text to a bounded prefix so a huge result is not fully
@@ -523,52 +367,6 @@ class TelemetryMiddleware(Middleware):
             pass
         return None
 
-    @staticmethod
-    def _result_shape(result_obj: Any) -> Any:
-        """Content-free description of a result (used when results aren't logged).
-
-        Key NAMES are schema, not data — and unlike a bare key count they
-        distinguish an ``applied`` result from an ``apply_failed`` one.
-        """
-        if result_obj is None:
-            return None
-        try:
-            if isinstance(result_obj, dict):
-                keys = [k if isinstance(k, str) else str(k) for k in list(result_obj)[:24]]
-                return {"_type": "object", "_keys": keys}
-            if isinstance(result_obj, (list, tuple)):
-                return {"_type": "array", "_items": len(result_obj)}
-            if isinstance(result_obj, str):
-                return {"_type": "string", "_bytes": len(result_obj.encode("utf-8"))}
-            return {"_type": type(result_obj).__name__}
-        except Exception:  # noqa: BLE001
-            return {"_type": "unknown"}
-
-    def _tool_outcome(self, result_obj: Any) -> dict[str, Any]:
-        """Tool-DECLARED outcome fields from a structured result.
-
-        This repo's tools return failures as data ({"status": "apply_failed",
-        ...}), which the MCP layer records as success — without these fields
-        every VA rejection in a trace looks like a win.
-        """
-        if not isinstance(result_obj, dict):
-            return {}
-        out: dict[str, Any] = {}
-        tool_status = result_obj.get("status")
-        if isinstance(tool_status, str):
-            out["tool_status"] = tool_status
-            out["is_tool_error"] = _is_tool_failure_status(tool_status)
-            message = result_obj.get("message")
-            if isinstance(message, str) and out["is_tool_error"]:
-                # Scrub BEFORE bounding, or a host cut at the cap boundary
-                # would partially leak.
-                out["tool_message"], _ = bounded_redact(self._scrub_host(message), 512)
-            for key in ("failed_operation_index", "error_count"):
-                value = result_obj.get(key)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    out[key] = value
-        return out
-
     def _tool_tier(self, tool: str) -> int | None:
         """Tier of *tool*, resolved through the registry the tiers populate.
 
@@ -585,19 +383,6 @@ class TelemetryMiddleware(Middleware):
                 self._tool_tiers = {}
         return self._tool_tiers.get(tool)
 
-    @staticmethod
-    def _args_hash(arguments: dict[str, Any]) -> str:
-        """Stable 12-hex fingerprint of the (goal-stripped) arguments.
-
-        Exact-retry runs — the loops a trace analysis needs to count — become
-        a one-line groupby instead of ad-hoc rehashing.
-        """
-        try:
-            canonical = json.dumps(arguments, sort_keys=True, default=str, ensure_ascii=False)
-        except Exception:  # noqa: BLE001
-            canonical = str(arguments)
-        return hashlib.sha256(canonical.encode("utf-8", errors="ignore")).hexdigest()[:12]
-
     def _next_seq(self) -> int:
         """Monotonic call counter for the run — the trace's ordering key.
 
@@ -606,30 +391,6 @@ class TelemetryMiddleware(Middleware):
         """
         self._seq += 1
         return self._seq
-
-    def _scrub_host(self, text: Any) -> Any:
-        """Mask the Viya host in free-text fields (raw HTTP errors embed it)."""
-        if not isinstance(text, str) or not self._viya_host:
-            return text
-        return text.replace(self._viya_host, "[viya-host]")
-
-    def _scrub_host_deep(self, value: Any) -> Any:
-        """Recursively mask the Viya host in a (bounded) logged result.
-
-        Full results in failures/always mode quote raw VA bodies and carry
-        open_url — scrubbing only error/tool_message would leak the host in
-        the very field the other two scrubbed. Runs on ALREADY-BOUNDED values
-        (<= max_result_bytes), so the recursion is cheap.
-        """
-        if not self._viya_host:
-            return value
-        if isinstance(value, str):
-            return value.replace(self._viya_host, "[viya-host]")
-        if isinstance(value, dict):
-            return {k: self._scrub_host_deep(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._scrub_host_deep(v) for v in value]
-        return value
 
     _viya_host: str | None = None
 
@@ -659,7 +420,7 @@ class TelemetryMiddleware(Middleware):
         goal_val, _ = (
             bounded_redact(goal, field_bytes) if goal is not None else (None, False)
         )
-        outcome = self._tool_outcome(result_obj)
+        outcome = tool_outcome(result_obj, self._viya_host)
         log_full = self.result_mode == "always" or (
             self.result_mode == "failures" and (is_error or outcome.get("is_tool_error"))
         )
@@ -667,12 +428,12 @@ class TelemetryMiddleware(Middleware):
             res_val, res_trunc = bounded_redact(result_obj, result_bytes)
             # Deep-scrub AFTER bounding: full results quote raw VA bodies and
             # carry open_url; the value is already capped so recursion is cheap.
-            res_val = self._scrub_host_deep(res_val)
+            res_val = scrub_host_deep(res_val, self._viya_host)
         else:
-            res_val, res_trunc = self._result_shape(result_obj), False
+            res_val, res_trunc = result_shape(result_obj), False
         err_val, _ = (
             # Scrub BEFORE bounding — see _tool_outcome.
-            bounded_redact(self._scrub_host(error), field_bytes) if error is not None else (None, False)
+            bounded_redact(scrub_host(error, self._viya_host), field_bytes) if error is not None else (None, False)
         )
         error_type, http_status = classify_error(err_val)
         record = {
@@ -687,7 +448,7 @@ class TelemetryMiddleware(Middleware):
             "goal": goal_val,
             "arguments": args_val,
             "arguments_truncated": args_trunc,
-            "args_hash": self._args_hash(arguments),
+            "args_hash": args_hash(arguments),
             "result": res_val,
             "result_truncated": res_trunc,
             "result_logged": log_full,

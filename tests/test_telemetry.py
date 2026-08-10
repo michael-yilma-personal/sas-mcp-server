@@ -680,7 +680,7 @@ async def test_failures_mode_result_is_host_scrubbed():
 
 
 def test_failure_status_heuristic_covers_repo_statuses():
-    from sas_mcp_server.telemetry import _is_tool_failure_status
+    from sas_mcp_server.helpers.telemetry_helpers import is_tool_failure_status
 
     failures = [
         "apply_failed", "export_failed", "invalid_operation", "invalid_request",
@@ -689,13 +689,13 @@ def test_failure_status_heuristic_covers_repo_statuses():
         "table_not_global", "export_too_large", "no_active_session", "error",
     ]
     successes = ["created", "applied", "copied", "deleted", "ok", "valid", "promoted", "already_global", "success"]
-    assert all(_is_tool_failure_status(s) for s in failures)
-    assert not any(_is_tool_failure_status(s) for s in successes)
-    assert not _is_tool_failure_status(None)
+    assert all(is_tool_failure_status(s) for s in failures)
+    assert not any(is_tool_failure_status(s) for s in successes)
+    assert not is_tool_failure_status(None)
 
 
 def test_parse_log_results_tristate():
-    from sas_mcp_server.config import parse_log_results
+    from sas_mcp_server.env import parse_log_results
 
     assert parse_log_results("failures") == "failures"
     assert parse_log_results("ALWAYS") == "always"
@@ -858,4 +858,6 @@ def test_server_version_prefers_the_source_checkout():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject.open("rb") as fh:
         expected = tomllib.load(fh)["project"]["version"]
-    assert TelemetryMiddleware._server_version() == expected
+    from sas_mcp_server.helpers.telemetry_helpers import server_version
+
+    assert server_version() == expected
