@@ -145,6 +145,22 @@ curl -isk https://viya4-s2.zeus.sashq-d.openstack.sas.com/mcp -X POST \
 
 Then point an MCP client at `https://viya4-s2.zeus.sashq-d.openstack.sas.com/mcp`.
 
+### Both auth paths work here
+
+`ALLOW_RAW_BEARER` is additive, not a replacement — HTTP mode always runs PKCE,
+so the browser sign-in and token-bearing clients share the one `/mcp` endpoint.
+Verified against the deployment: dynamic client registration returns a
+`client_id`, and `/authorize` 302s onward into the consent step.
+
+**This topology also sidesteps the CSP problem** that `examples/configuration.md`
+warns about. Viya sends `Content-Security-Policy: form-action 'self'`, which
+blocks the post-login redirect to an MCP server on a *different* origin — the
+reason local development is told to disable the directive. Because this
+deployment serves `/auth/callback` on the **Viya host itself**, the callback is
+same-origin and `'self'` permits it. Nothing needs disabling.
+
+That advantage disappears if you move the server to its own hostname.
+
 ---
 
 ## Deliberate choices
