@@ -1,0 +1,40 @@
+# Environment overrides for the Zeus s2 cluster.
+#
+#   helm upgrade --install sas-mcp deploy/helm/sas-mcp-server -n llm \
+#     -f deploy/helm/values-zeus-s2.yaml
+#
+# Everything here is specific to that environment; the chart's own defaults are
+# the safe general-purpose ones. Nothing secret lives in this file — the signing
+# key is referenced from a secret created out of band:
+#
+#   kubectl -n llm create secret generic sas-mcp-server \
+#     --from-literal=signing-key="$(openssl rand -base64 32)"
+
+fullnameOverride: sas-mcp-server
+
+viya:
+  endpoint: https://viya4-s2.zeus.sashq-d.openstack.sas.com
+  clientId: sas-mcp-gerdaw
+  # This Viya presents a self-signed certificate. Note the cost: config.py
+  # monkey-patches httpx process-wide, so the OAuth token exchange stops
+  # verifying too. Acceptable inside this cluster; not a default worth shipping.
+  sslVerify: false
+
+server:
+  name: SAS Viya MCP Server (Zeus s2)
+  # Accepted deliberately: scripted callers here already hold Viya tokens.
+  # Any SASLogon-signed JWT is a full credential on this path — see values.yaml.
+  allowRawBearer: true
+
+ingress:
+  host: viya4-s2.zeus.sashq-d.openstack.sas.com
+  className: nginx
+  tls:
+    enabled: true
+    # Pre-existing secret in the llm namespace, shared with the other
+    # deployments already serving on this host.
+    secretName: llm-tls-certs
+
+signingKey:
+  existingSecret: sas-mcp-server
+  existingSecretKey: signing-key

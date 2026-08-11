@@ -1,0 +1,134 @@
+{{- include "sas-mcp-server.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sas-mcp-server.fullname" . }}
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if include "sas-mcp-server.hasRWO" . }}
+  # Any RWO PVC in the pod — state OR telemetry — makes RollingUpdate a
+  # Multi-Attach deadlock when the new pod lands on another node.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sas-mcp-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when config changes. The secret is included because env
+        # vars sourced via secretKeyRef are NOT refreshed in a running
+        # container, so rotating the signing key without this leaves the pod
+        # signing with the old (possibly compromised) key indefinitely.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "sas-mcp-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "sas-mcp-server.serviceAccountName" . }}
+      # Belt and braces with the ServiceAccount's own setting: the server calls
+      # Viya over HTTPS and never touches the Kubernetes API, and an API token
+      # on disk is readable by any tool that can read a path.
+      automountServiceAccountToken: false
+      # The lifespan issues one DELETE per warm compute session on shutdown;
+      # allow time for that rather than leaking sessions on every rollout.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "sas-mcp-server.fullname" . }}
+          env:
+            - name: MCP_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sas-mcp-server.signingSecretName" . }}
+                  key: {{ include "sas-mcp-server.signingSecretKey" . }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            # OAuth client registrations (a Fernet-encrypted file tree).
+            # Required whenever readOnlyRootFilesystem is true: OAuthProxy
+            # mkdirs this at IMPORT time, so without it the container
+            # crash-loops at startup rather than failing later.
+            - name: fastmcp-state
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            {{- if .Values.telemetry.enabled }}
+            - name: telemetry
+              mountPath: {{ dir .Values.telemetry.logPath }}
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: fastmcp-state
+          {{- if eq .Values.persistence.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ include "sas-mcp-server.fullname" . }}-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if .Values.telemetry.enabled }}
+        - name: telemetry
+          {{- if eq .Values.telemetry.persistence.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ include "sas-mcp-server.fullname" . }}-telemetry
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

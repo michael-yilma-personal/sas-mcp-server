@@ -30,7 +30,8 @@ Here you can find getting articles on how to use and integrate the SAS MCP Serve
         - See [configuration.md](/examples/configuration.md)
 
 - Optional
-    - [Docker](https://docs.docker.com/engine/install): refer to [docker setup](/examples/docker/setup.md)
+    - [Docker](https://docs.docker.com/engine/install): refer to [container setup](/deploy/docker.md)
+    - Kubernetes: sample manifest and Helm chart in [deploy/](/deploy/README.md)
 
 ### Installation
 
@@ -122,19 +123,20 @@ If your compute deployment does not expose `/compute/contexts` and only supports
 
 ### Choosing a deployment mode
 
-| | **HTTP** | **Stdio** | **Docker** |
-|---|---|---|---|
-| **How it runs** | Long-running server you start separately | MCP client spawns it on demand | Containerized HTTP server |
-| **Authentication** | OAuth2 PKCE flow (browser popup) | Cached token via `sas-viya` CLI or `sas-mcp-login` | OAuth2 PKCE flow (browser popup) |
-| **Best for** | Multi-user or shared setups; production-like environments | Single-user local development; quick experimentation | Team deployments; CI/CD; environments without Python installed |
-| **Requires** | Python + uv | Python + uv (+ optional `sas-viya` CLI) | Docker or Podman only |
-| **Credentials stored?** | No — user authenticates interactively | No — only an access token (not a password) is cached | No — user authenticates interactively |
-| **MCP client config** | Point client to `http://localhost:8134/mcp` | Client runs `uv run app-stdio` | Point client to `http://host:8134/mcp` |
+| | **HTTP** | **Stdio** | **Docker** | **Kubernetes** |
+|---|---|---|---|---|
+| **How it runs** | Long-running server you start separately | MCP client spawns it on demand | Containerized HTTP server | Containerized, behind an ingress |
+| **Authentication** | OAuth2 PKCE flow (browser popup) | Cached token via `sas-viya` CLI or `sas-mcp-login` | OAuth2 PKCE flow (browser popup) | PKCE and/or raw Viya bearer token |
+| **Best for** | Multi-user or shared setups; production-like environments | Single-user local development; quick experimentation | Team deployments; CI/CD; environments without Python installed | Shared/organisational deployments alongside Viya |
+| **Requires** | Python + uv | Python + uv (+ optional `sas-viya` CLI) | Docker or Podman only | A cluster, an ingress controller, a TLS secret |
+| **Credentials stored?** | No — user authenticates interactively | No — only an access token (not a password) is cached | No — user authenticates interactively | No — a signing key in a `Secret`; users authenticate themselves |
+| **MCP client config** | Point client to `http://localhost:8134/mcp` | Client runs `uv run app-stdio` | Point client to `http://host:8134/mcp` | Point client to `https://<viya-host>/mcp` |
 
 **Quick guidance:**
 - **Starting out or exploring?** Use **stdio** — one `sas-viya auth loginCode` or `uv run sas-mcp-login`, then your MCP client manages the server lifecycle.
 - **Need secure, interactive auth?** Use **HTTP** — no stored passwords, each user authenticates via browser.
 - **Deploying for a team or on a server?** Use **Docker** — portable, no Python dependency on the host, easy to integrate with orchestrators.
+- **Running it for a whole organisation?** Use **Kubernetes** — a sample manifest and a Helm chart are in [deploy/](/deploy/README.md), including the ingress routing the OAuth flow needs.
 - **Using Gemini CLI?** Use **stdio** — Gemini CLI does not support HTTP mode or browser-based OAuth. See [Gemini CLI configuration](examples/configuration.md#gemini-cli).
 
 ### Limiting exposed tools (tiers)
