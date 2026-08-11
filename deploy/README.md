@@ -255,18 +255,18 @@ a shared deployment it is collecting other people's work, so tell them first.
 Nothing is transmitted anywhere: the log stays on the volume until someone
 deliberately copies it off.
 
-**One version trap.** `telemetry.logResults` is a tri-state (`never` /
-`failures` / `always`) as of the **schema-v3** work, which is merged to `main`
-(#40) but **not yet in a released image** — `image.tag` still defaults to
-`1.8.0`. The 1.8.0 image parses the same variable with `env_bool`, which accepts
-only `true/1/yes/on` and `false/0/no/off` and silently falls back to its default
-for anything else, so `failures` there quietly means shape-only. `"true"` and
-`"false"` mean the same thing on both builds, so the chart defaults to `"false"`
-and the install notes warn if you set a v3-only value.
+`telemetry.logResults` is a tri-state — `never` / `failures` / `always` —
+defaulting to **`failures`**: full (capped, redacted) result bodies only for
+calls that errored or whose tool declared a failure. That is the highest-value
+trace data and the least likely to carry table rows.
 
-Once a release ships a v3 image and `image.tag` is bumped, `failures` becomes
-the useful setting — full result bodies only for calls that errored or whose
-tool declared a failure — and the warning stops applying.
+**One version trap.** The tri-state needs **schema v3**, i.e. image `1.9.0` or
+newer, which is what this chart now deploys by default. If you *pin* `image.tag`
+to `1.8.0` or older, that build parses the same variable with `env_bool` —
+`true/1/yes/on` and `false/0/no/off` only — and silently falls back to its
+default for anything else, so `failures` would quietly mean shape-only.
+`"true"` and `"false"` mean the same thing on every build, and the install notes
+warn if the combination looks wrong.
 
 ---
 
