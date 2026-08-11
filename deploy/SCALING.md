@@ -1,7 +1,7 @@
 # Scaling the MCP server with user count — investigation
 
-**Date:** 2026-08-10 · **Measured against:** the live deployment on Zeus s2
-(`helm release sas-mcp`, ns `llm`, v1.8.0, 1 replica)
+**Date:** 2026-08-10 · **Measured against:** a live cluster
+(`helm release sas-mcp`, ns `sas-mcp`, v1.8.0, 1 replica)
 
 ---
 
@@ -155,7 +155,7 @@ An OOM kill is not graceful: it is SIGKILL, so the lifespan never runs and every
 warm compute session leaks until Viya reaps it.
 
 ```sh
-helm upgrade sas-mcp deploy/helm/sas-mcp-server -n llm --reuse-values \
+helm upgrade sas-mcp deploy/helm/sas-mcp-server -n sas-mcp --reuse-values \
   --set resources.limits.memory=1Gi
 ```
 

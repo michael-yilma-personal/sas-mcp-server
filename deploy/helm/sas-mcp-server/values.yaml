@@ -1,4 +1,5 @@
-# Defaults target the Zeus s2 environment; override per deployment.
+# Chart defaults. Anything specific to YOUR environment — endpoint, client
+# id, ingress host, TLS secret — belongs in your own values file passed with -f.
 
 replicaCount: 1
 
@@ -17,10 +18,10 @@ fullnameOverride: ""
 # ---------------------------------------------------------------------------
 viya:
   # The Viya environment this server talks to.
-  endpoint: https://viya4-s2.zeus.sashq-d.openstack.sas.com
+  endpoint: https://your-viya-server.com
   # SASLogon OAuth client id. Its registered redirect URI must include
   # <ingress.url>/auth/callback or the browser PKCE flow dead-ends.
-  clientId: sas-mcp-gerdaw
+  clientId: sas-mcp
   # Matches the application default (verify). Set false ONLY for a self-signed
   # Viya certificate — it disables verification for the whole process, so the
   # OAuth token exchange (carrying the user's authorization code and issued
@@ -36,7 +37,7 @@ viya:
 # ---------------------------------------------------------------------------
 server:
   # Advertised to MCP clients during the initialize handshake.
-  name: SAS Viya MCP Server (Zeus s2)
+  name: SAS Viya Execution MCP Server
   port: 8134
   # Tool tiers to expose, e.g. "0-4" or "0,1,7". Empty = all 75 tools.
   tiers: ""
@@ -76,7 +77,7 @@ server:
 # the key and forge tokens. Either create the secret out of band (recommended)
 # or set `signingKey.value`.
 #
-#   kubectl -n llm create secret generic sas-mcp-server \
+#   kubectl -n sas-mcp create secret generic sas-mcp-server \
 #     --from-literal=signing-key="$(openssl rand -base64 32)"
 # ---------------------------------------------------------------------------
 signingKey:
@@ -104,7 +105,7 @@ signingKey:
 ingress:
   enabled: true
   className: nginx
-  host: viya4-s2.zeus.sashq-d.openstack.sas.com
+  host: your-viya-server.com
   # FIXED, not a knob. mcp_server.py does `app = mcp.http_app()` with no path
   # argument, so the app serves /mcp and no env var can move it; pointing the
   # ingress elsewhere would just 404. The chart fails the render rather than
@@ -117,7 +118,7 @@ ingress:
   baseUrlOverride: ""
   tls:
     enabled: true
-    secretName: llm-tls-certs
+    secretName: viya-tls-certs
   # Set false if the browser PKCE flow is not needed — e.g. every client passes
   # a Viya token directly with server.allowRawBearer=true. That collapses the
   # ingress to the single mcpPath rule and claims nothing at the host root.

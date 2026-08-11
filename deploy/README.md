@@ -68,12 +68,12 @@ and follows the chain from there. Confirmed by driving the real app:
 
 ```
 POST /mcp -> 401
-  WWW-Authenticate: Bearer …, resource_metadata="https://viya4-s2…/.well-known/oauth-protected-resource/mcp"
+  WWW-Authenticate: Bearer …, resource_metadata="https://your-viya-server.com/.well-known/oauth-protected-resource/mcp"
 
 GET /.well-known/oauth-authorization-server -> 200
-  authorization_endpoint: https://viya4-s2…/authorize
-  token_endpoint:         https://viya4-s2…/token
-  registration_endpoint:  https://viya4-s2…/register
+  authorization_endpoint: https://your-viya-server.com/authorize
+  token_endpoint:         https://your-viya-server.com/token
+  registration_endpoint:  https://your-viya-server.com/register
 ```
 
 So routing only `/mcp` gets you a server that a client can reach and never sign
@@ -99,32 +99,31 @@ published in this open-source repo, so anyone can derive the key and forge
 tokens. Create a real one:
 
 ```sh
-kubectl -n llm create secret generic sas-mcp-server \
+kubectl -n sas-mcp create secret generic sas-mcp-server \
   --from-literal=signing-key="$(openssl rand -base64 32)"
 ```
 
 The derivation is deterministic, so replicas sharing the secret issue
-compatible tokens. Your local `.env` already has a good value if you would
-rather keep the two environments aligned — but pass it through the secret, not
-through a values file.
+compatible tokens. Pass it through the secret rather than a values file, so it
+never lands in version control.
 
-**2. SASLogon redirect URI.** Register this on OAuth client `sas-mcp-gerdaw`:
+**2. SASLogon redirect URI.** Register this on OAuth client `sas-mcp`:
 
 ```
-https://viya4-s2.zeus.sashq-d.openstack.sas.com/auth/callback
+https://your-viya-server.com/auth/callback
 ```
 
 Without it the browser sign-in dead-ends after the Viya login page. This is a
 Viya-side change; the deployment cannot do it for you.
 
-**3. Image pull.** The manifests use `ghcr.io/sassoftware/sas-mcp-server:1.8.0`.
+**3. Image pull.** The manifests use `ghcr.io/sassoftware/sas-mcp-server:1.9.0`.
 If the cluster cannot pull from ghcr.io, mirror it first:
 
 ```sh
-podman pull ghcr.io/sassoftware/sas-mcp-server:1.8.0
-podman tag ghcr.io/sassoftware/sas-mcp-server:1.8.0 \
-  registry.zeus.sashq-d.openstack.sas.com/library/sas-mcp-server:1.8.0
-podman push registry.zeus.sashq-d.openstack.sas.com/library/sas-mcp-server:1.8.0
+podman pull ghcr.io/sassoftware/sas-mcp-server:1.9.0
+podman tag ghcr.io/sassoftware/sas-mcp-server:1.9.0 \
+  registry.example.com/library/sas-mcp-server:1.9.0
+podman push registry.example.com/library/sas-mcp-server:1.9.0
 ```
 
 then set `image.repository` accordingly.
@@ -137,21 +136,21 @@ then set `image.repository` accordingly.
 
 ```sh
 kubectl apply -f deploy/k8s/sas-mcp-server.yaml
-kubectl -n llm rollout status deploy/sas-mcp-server
+kubectl -n sas-mcp rollout status deploy/sas-mcp-server
 ```
 
 ### Helm
 
 ```sh
 helm upgrade --install sas-mcp deploy/helm/sas-mcp-server \
-  --namespace llm \
+  --namespace sas-mcp \
   --set fullnameOverride=sas-mcp-server
 ```
 
 Override per environment:
 
 ```sh
-helm upgrade --install sas-mcp deploy/helm/sas-mcp-server -n llm \
+helm upgrade --install sas-mcp deploy/helm/sas-mcp-server -n sas-mcp \
   --set viya.endpoint=https://other-viya.example.com \
   --set ingress.host=other-viya.example.com \
   --set viya.clientId=sas-mcp-prod \
@@ -165,17 +164,17 @@ cannot drift out of step with the ingress.
 ### Verify
 
 ```sh
-kubectl -n llm port-forward svc/sas-mcp-server 8134:8134
+kubectl -n sas-mcp port-forward svc/sas-mcp-server 8134:8134
 curl -s localhost:8134/health
 # {"status":"healthy","service":"sas-viya-execution-mcp"}
 
 # through the ingress — a 401 with a resource_metadata pointer is CORRECT,
 # it is how a client discovers the sign-in flow
-curl -isk https://viya4-s2.zeus.sashq-d.openstack.sas.com/mcp -X POST \
+curl -isk https://your-viya-server.com/mcp -X POST \
   -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}' | head -20
 ```
 
-Then point an MCP client at `https://viya4-s2.zeus.sashq-d.openstack.sas.com/mcp`.
+Then point an MCP client at `https://your-viya-server.com/mcp`.
 
 ### Both auth paths work here
 
@@ -242,7 +241,7 @@ model's stated `goal`, status, error, and latency. The chart wires it up; it is
 disabled unless you ask for it:
 
 ```sh
-helm upgrade sas-mcp deploy/helm/sas-mcp-server -n llm --reuse-values \
+helm upgrade sas-mcp deploy/helm/sas-mcp-server -n sas-mcp --reuse-values \
   --set telemetry.enabled=true \
   --set telemetry.persistence.type=pvc      # else the log dies with the pod
 ```
@@ -251,7 +250,7 @@ That sets `COLLECTION_MODE` and friends, and mounts a volume at the log's
 directory. Read it back with:
 
 ```sh
-kubectl -n llm exec deploy/sas-mcp-server -- cat /var/log/sas-mcp/tool-usage.log
+kubectl -n sas-mcp exec deploy/sas-mcp-server -- cat /var/log/sas-mcp/tool-usage.log
 ```
 
 **Before enabling this on a shared server**, be clear about what it is: the log
