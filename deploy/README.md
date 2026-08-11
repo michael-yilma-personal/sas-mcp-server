@@ -1,6 +1,17 @@
-# Deploying the SAS Viya MCP Server on Kubernetes
+# Deploying the SAS Viya MCP Server
 
-Two equivalent artifacts, both serving the MCP endpoint at
+Everything about running the server somewhere other than your laptop. For
+configuring Viya auth and connecting MCP clients, see
+[`../examples/configuration.md`](../examples/configuration.md).
+
+| Target | Start here |
+|---|---|
+| **Container** (Docker / Podman) | [`docker.md`](docker.md) — build or pull the image, run it |
+| **Kubernetes** | this file, plus the artifacts below |
+
+### Kubernetes artifacts
+
+Two equivalent ways in, both serving the MCP endpoint at
 `https://<viya-host>/mcp`:
 
 | | Path | Use when |
@@ -10,10 +21,23 @@ Two equivalent artifacts, both serving the MCP endpoint at
 
 Defaults in both target `viya4-s2.zeus.sashq-d.openstack.sas.com`, namespace
 `llm`, reusing the existing `llm-tls-certs` secret and the `nginx` ingress
-class — matching the pattern in the other deployments on that cluster.
+class. Environment-specific overrides live in
+[`helm/values-zeus-s2.yaml`](helm/values-zeus-s2.yaml); the chart's own defaults
+are the safe general-purpose ones.
 
-Verified with `helm lint`, `helm template`, and `kubectl apply --dry-run=client`
-against a v1.35 client. **Not yet applied to a live cluster.**
+### Background
+
+Why the manifests look the way they do — worth reading before changing them:
+
+- [`K8S-DEPLOYMENT.md`](K8S-DEPLOYMENT.md) — what had to be true before this
+  could go behind an ingress: the signing key, the OAuth state store, the dev
+  auto-reloader, and the in-process session cache.
+- [`SCALING.md`](SCALING.md) — how resources track user count, measured against
+  a live deployment. Short version: the MCP pod is not what you scale.
+
+The chart is linted, rendered and `kubectl apply --dry-run=client`-validated in
+both variants, and has been applied to a real cluster — the numbers in
+`SCALING.md` come from that deployment rather than from estimates.
 
 ---
 
@@ -278,11 +302,9 @@ token.
 
 ## Not covered
 
-- No live-cluster apply. Schema-valid and rendering correctly is not the same as
-  running.
-- `SSL_VERIFY=false` is set for the self-signed Viya certificate. See
-  `FASTMCP-4-IMPACT.md` for why that flag needs revisiting before a FastMCP 4
-  upgrade — the patch it relies on does not cover FastMCP 4's HTTP client.
+- `SSL_VERIFY=false` is set for the self-signed Viya certificate. It disables
+  certificate verification for the whole server process, not just the Viya API
+  calls, so a trusted certificate is the better answer wherever you can get one.
 - No live-cluster load or failover testing beyond what `SCALING.md` records.
 - No NetworkPolicy, PodDisruptionBudget, or HPA — an HPA in particular would be
   actively wrong while replicas are capped at 1.
