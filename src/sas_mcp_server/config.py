@@ -3,7 +3,6 @@
 
 import logging
 import os
-import ssl
 
 from dotenv import load_dotenv
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -11,6 +10,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from .auth import PermissiveOAuthProxy
 from .env import env_bool, parse_log_results
 from .exceptions import ConfigError
+from .ssl_patch import disable_tls_verification
 
 load_dotenv()
 
@@ -75,34 +75,10 @@ if _legacy_tag and not COLLECTION_RUN_TAG:
 _logger = logging.getLogger(__name__)
 
 if not SSL_VERIFY:
-    # Disable SSL verification for self-signed Viya certificates
-    import httpx
-    # Guard against re-patching when this module is reloaded (e.g. by tests
-    # that del sys.modules['sas_mcp_server.config'] and re-import). Without
-    # this, each reload stacks another wrapper around the existing one,
-    # eventually breaking outbound httpx connections in the same process.
-    if not getattr(httpx.AsyncClient.__init__, "_sas_mcp_ssl_patched", False):
-        _ssl_context = ssl.create_default_context()
-        _ssl_context.check_hostname = False
-        _ssl_context.verify_mode = ssl.CERT_NONE
-        # Monkey-patch httpx to use our permissive SSL context by default
-        _original_async_client_init = httpx.AsyncClient.__init__
-
-        def _patched_async_client_init(self, *args, **kwargs):
-            kwargs.setdefault("verify", _ssl_context)
-            _original_async_client_init(self, *args, **kwargs)
-
-        _patched_async_client_init._sas_mcp_ssl_patched = True
-        httpx.AsyncClient.__init__ = _patched_async_client_init
-
-        _original_client_init = httpx.Client.__init__
-
-        def _patched_client_init(self, *args, **kwargs):
-            kwargs.setdefault("verify", _ssl_context)
-            _original_client_init(self, *args, **kwargs)
-
-        _patched_client_init._sas_mcp_ssl_patched = True
-        httpx.Client.__init__ = _patched_client_init
+    # Self-signed Viya certificates. Patches httpx AND httpx2 (FastMCP 4's
+    # client), so the exemption keeps covering FastMCP's own JWKS/OAuth calls
+    # across a major upgrade. See sas_mcp_server.ssl_patch.
+    disable_tls_verification()
 
 VIYA_ENDPOINT = os.getenv("VIYA_ENDPOINT", "").rstrip("/")
 CLIENT_ID = os.getenv("CLIENT_ID", "sas-mcp")
