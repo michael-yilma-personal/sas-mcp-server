@@ -22,10 +22,10 @@ viya:
   # <ingress.url>/auth/callback or the browser PKCE flow dead-ends.
   clientId: sas-mcp-gerdaw
   # Matches the application default (verify). Set false ONLY for a self-signed
-  # Viya certificate — it monkey-patches httpx process-wide with
-  # check_hostname=False / CERT_NONE, so the OAuth token exchange (carrying the
-  # user's authorization code and issued Viya token) also stops verifying.
-  # The Zeus s2 environment needs false; see values-zeus-s2.yaml.
+  # Viya certificate — it disables verification for the whole process, so the
+  # OAuth token exchange (carrying the user's authorization code and issued
+  # Viya token) also stops verifying. Override it in your own environment
+  # values file rather than changing this default.
   sslVerify: true
   computeContextName: SAS Job Execution compute context
   # Set to use a fixed compute session instead of context-backed sessions.

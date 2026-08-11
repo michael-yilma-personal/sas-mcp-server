@@ -19,11 +19,19 @@ Two equivalent ways in, both serving the MCP endpoint at
 | **Sample manifest** | `k8s/sas-mcp-server.yaml` | One environment, values edited in place. Read this first — it is the clearest statement of what gets deployed. |
 | **Helm chart** | `helm/sas-mcp-server/` | Several environments, or the settings belong in a values file. |
 
-Defaults in both target `viya4-s2.zeus.sashq-d.openstack.sas.com`, namespace
-`llm`, reusing the existing `llm-tls-certs` secret and the `nginx` ingress
-class. Environment-specific overrides live in
-[`helm/values-zeus-s2.yaml`](helm/values-zeus-s2.yaml); the chart's own defaults
-are the safe general-purpose ones.
+The chart's defaults are the safe general-purpose ones. Keep anything specific
+to your environment — the Viya endpoint, the OAuth client id, the ingress host,
+the TLS secret, and whether `sslVerify` has to be off for a self-signed
+certificate — in your **own** values file, passed with `-f`:
+
+```sh
+helm upgrade --install sas-mcp deploy/helm/sas-mcp-server -n <namespace> \
+  -f my-environment.yaml
+```
+
+`deploy/helm/values-*.yaml` is gitignored for exactly that reason: those files
+describe a deployment, not the project, and hostnames and client ids should not
+travel with the repo.
 
 ### Background
 

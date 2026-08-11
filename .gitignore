@@ -48,3 +48,8 @@ Thumbs.db
 # Reference material (API specs, course samples, scratch scripts) — kept local, not tracked
 docs/
 
+
+# Per-environment Helm values — hostnames, client ids and cluster specifics that
+# belong to a deployment, not to the repo. The chart's own defaults live in
+# deploy/helm/sas-mcp-server/values.yaml and are tracked.
+deploy/helm/values-*.yaml
