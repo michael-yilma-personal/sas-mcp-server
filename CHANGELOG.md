@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- **The server is listed on the MCP Registry, as the container image** — a `server.json` at the repo root describing the published OCI package, so MCP clients can discover and install this server instead of having to be told about it. Metadata only; the artifact stays on GHCR and nothing new is built. The listing declares `docker run -i --rm -v <home>/.sas:/app/.sas <image> app-stdio`: `app-stdio` overrides the image's `CMD ["app"]`, which starts the HTTP server and speaks no stdio, and the mount target must be `/app/.sas` because `$HOME` is `/app` in the image and stdio mode reads the `sas-viya auth loginCode` token cache from `~/.sas/credentials.json`. Verified against a published image through a real MCP client: 75 tools registered, token loaded from the mount, live data returned.
+  - **Ownership proof** is a new `LABEL io.modelcontextprotocol.server.name` in the `Dockerfile`. The registry fetches the image anonymously at publish time and refuses the listing unless that label equals `name` in `server.json`, so the two must stay in step. Every image published so far predates the label, so the first successful publish is whichever tag first ships an image built from this Dockerfile.
+  - **Publishing runs in CI** (`publish-mcp-registry`, gated on `needs: build-and-push` so the image exists before it is validated). It authenticates with GitHub Actions OIDC, which is what makes the `io.github.sassoftware` namespace reachable at all: the registry grants `io.github.<owner>/*` from the token's `repository_owner` claim, whereas a human publishing by hand would have to be an **Owner** of the organisation. The job rewrites `version` and the image tag from the git tag, so a forgotten bump cannot publish metadata pointing at the previous image.
+  - `.github/mcp-registry.md` — maintainer notes, beside the workflow that implements them — records the shape and the constraints that are not obvious from the published examples — OCI packages must carry the tag in `identifier` and must **not** have `version` or `registryBaseUrl`, `registryType` is `oci` rather than `docker`, and `description` is capped at 100 characters.
+
 ## [1.9.1] - 2026-08-12
 
 ### Fixed

@@ -70,3 +70,48 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  # Lists the image just pushed on the public MCP Registry
+  # (registry.modelcontextprotocol.io), which is what feeds the GitHub MCP
+  # Registry and other client-side catalogues. Metadata only — the artifact
+  # stays on GHCR.
+  publish-mcp-registry:
+    # MUST run after the image exists. The registry validates ownership by
+    # fetching ghcr.io/<repo>:<version> anonymously and reading the
+    # io.modelcontextprotocol.server.name label off its config, so a standalone
+    # workflow on the same tag would race the build and fail with
+    # "OCI image ... does not exist in the registry".
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC is what makes the io.github.sassoftware namespace reachable at all:
+      # the registry reads the `repository_owner` claim off the Actions token and
+      # grants io.github.<owner>/*. Publishing by hand instead would require the
+      # human running it to be an Owner of the sassoftware org.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+
+      - name: Pin server.json to the released version
+        # Derived from the tag rather than trusted from the file, so a forgotten
+        # bump cannot publish metadata pointing at the previous image.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" --arg img "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+            '.version = $v | .packages[0].identifier = $img' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish

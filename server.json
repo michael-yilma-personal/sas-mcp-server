@@ -1,0 +1,80 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sassoftware/sas-mcp-server",
+  "title": "SAS Viya",
+  "description": "Execute SAS code and query Compute, CAS, and model APIs on SAS Viya via OAuth 2.0.",
+  "repository": {
+    "url": "https://github.com/sassoftware/sas-mcp-server",
+    "source": "github"
+  },
+  "version": "1.9.1",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/sassoftware/sas-mcp-server:1.9.1",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "app-stdio"
+        }
+      ],
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{sas_token_dir}:/app/.sas",
+          "description": "Mount the SAS Viya CLI token cache into the container. The server reads ~/.sas/credentials.json, and $HOME is /app inside the image, so the .sas directory has to land at /app/.sas.",
+          "isRequired": true,
+          "variables": {
+            "sas_token_dir": {
+              "description": "The .sas directory in your home directory, written by `sas-viya auth loginCode`. On Windows, C:\\Users\\<you>\\.sas.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "VIYA_ENDPOINT",
+          "description": "Base URL of your SAS Viya environment, e.g. https://viya.example.com. No trailing slash.",
+          "format": "string",
+          "isRequired": true
+        },
+        {
+          "name": "SSL_VERIFY",
+          "description": "Set false only for a self-signed Viya certificate. Disables verification for the whole process, so prefer a trusted certificate.",
+          "format": "string",
+          "default": "true"
+        },
+        {
+          "name": "CLIENT_ID",
+          "description": "SASLogon OAuth client id used for the token refresh exchange.",
+          "format": "string",
+          "default": "sas-mcp"
+        },
+        {
+          "name": "COMPUTE_CONTEXT_NAME",
+          "description": "Compute context that backs SAS code execution.",
+          "format": "string",
+          "default": "SAS Job Execution compute context"
+        },
+        {
+          "name": "MCP_TIERS",
+          "description": "Expose only some tool tiers, e.g. 0-4 or 0,1,7. Empty exposes all 75 tools. Tiers: 0 Compute, 1 Data Discovery, 2 Data Operations, 3 Reports, 4 Batch Jobs, 5 AutoML, 6 Models, 7 Decisioning.",
+          "format": "string"
+        },
+        {
+          "name": "MCP_READ_ONLY",
+          "description": "Expose only tools that neither change server-side state nor cause server-side work (43 of 75). Composes with MCP_TIERS.",
+          "format": "string",
+          "default": "false"
+        }
+      ]
+    }
+  ]
+}

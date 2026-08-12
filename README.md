@@ -138,6 +138,7 @@ If your compute deployment does not expose `/compute/contexts` and only supports
 - **Deploying for a team or on a server?** Use **Docker** — portable, no Python dependency on the host, easy to integrate with orchestrators.
 - **Running it for a whole organisation?** Use **Kubernetes** — a sample manifest and a Helm chart are in [deploy/](/deploy/README.md), including the ingress routing the OAuth flow needs.
 - **Using Gemini CLI?** Use **stdio** — Gemini CLI does not support HTTP mode or browser-based OAuth. See [Gemini CLI configuration](examples/configuration.md#gemini-cli).
+- **Installing from a client's server catalogue?** That path runs the published container in **stdio** mode (`app-stdio`), not as an HTTP server, so it authenticates from your `~/.sas` token cache — which has to be mounted into the container at `/app/.sas`.
 
 ### Limiting exposed tools (tiers)
 

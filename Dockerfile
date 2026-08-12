@@ -16,6 +16,11 @@ FROM python:3.12-slim-bookworm AS runner
 ARG HOST_PORT=8134
 
 LABEL maintainer="david.weik@sas.com"
+# Ownership proof for the MCP Registry. It fetches this image anonymously at
+# publish time and refuses the listing unless this label equals `name` in
+# server.json — it is the only thing stopping someone binding their registry
+# entry to an image they do not control. Keep the two in step.
+LABEL io.modelcontextprotocol.server.name="io.github.sassoftware/sas-mcp-server"
 LABEL org.opencontainers.image.source=https://github.com/sassoftware/sas-mcp-server
 LABEL org.opencontainers.image.description="SAS MCP Server — Model Context Protocol server for SAS Viya"
 LABEL org.opencontainers.image.licenses=Apache-2.0
