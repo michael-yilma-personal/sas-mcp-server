@@ -1,6 +1,6 @@
 [project]
 name = "sas-mcp-server"
-version = "1.9.1"
+version = "1.9.2"
 description = "An MCP server for executing SAS code and querying Compute, CAS, and model APIs on SAS Viya via OAuth 2.0."
 readme = "README.md"
 authors = [{name = "SAS Institute Inc."}]
@@ -57,7 +57,7 @@ extend-exclude = ["docs"]
 select = ["E", "F", "I", "B", "UP", "G", "TRY", "SIM"]
 ignore = [
     "TRY003",  # long messages in exceptions are fine for this CLI/server
-    "TRY300",  # "move to else block" — noisy, low value here
+    "TRY300",  # "move to else block" â€” noisy, low value here
 ]
 
 [tool.ruff.lint.per-file-ignores]

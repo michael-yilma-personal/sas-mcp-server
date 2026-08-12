@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-08-12
+
 ### Fixed
 - **The documented `edge` tag now exists.** `deploy/docker.md` has always listed `edge` as the tip of `main`, but the tag was never published: the metadata-action entry passed `value=edge` to `type=ref`, and `value=` is a `type=raw` attribute that `type=ref` ignores — so the branch name was used and the image landed as `main` instead. Anyone following the documented table got `manifest unknown`. Switched to `type=raw,value=edge`. The stale `main` tag remains on GHCR until someone deletes it; nothing references it.
 
