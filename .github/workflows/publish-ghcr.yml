@@ -43,7 +43,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch,enable=${{ github.ref == format('refs/heads/{0}', 'main') }},value=edge
+            # `value=` is a type=raw attribute; type=ref ignores it and emits the
+            # branch name, so this published `main` and never the documented
+            # `edge` that deploy/docker.md tells people to pull.
+            type=raw,value=edge,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
             type=sha,format=short,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

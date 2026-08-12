@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The documented `edge` tag now exists.** `deploy/docker.md` has always listed `edge` as the tip of `main`, but the tag was never published: the metadata-action entry passed `value=edge` to `type=ref`, and `value=` is a `type=raw` attribute that `type=ref` ignores — so the branch name was used and the image landed as `main` instead. Anyone following the documented table got `manifest unknown`. Switched to `type=raw,value=edge`. The stale `main` tag remains on GHCR until someone deletes it; nothing references it.
+
 ### Added
 - **The server is listed on the MCP Registry, as the container image** — a `server.json` at the repo root describing the published OCI package, so MCP clients can discover and install this server instead of having to be told about it. Metadata only; the artifact stays on GHCR and nothing new is built. The listing declares `docker run -i --rm -v <home>/.sas:/app/.sas <image> app-stdio`: `app-stdio` overrides the image's `CMD ["app"]`, which starts the HTTP server and speaks no stdio, and the mount target must be `/app/.sas` because `$HOME` is `/app` in the image and stdio mode reads the `sas-viya auth loginCode` token cache from `~/.sas/credentials.json`. Verified against a published image through a real MCP client: 75 tools registered, token loaded from the mount, live data returned.
   - **Ownership proof** is a new `LABEL io.modelcontextprotocol.server.name` in the `Dockerfile`. The registry fetches the image anonymously at publish time and refuses the listing unless that label equals `name` in `server.json`, so the two must stay in step. Every image published so far predates the label, so the first successful publish is whichever tag first ships an image built from this Dockerfile.
