@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Container images now match `uv.lock`** — the Dockerfile built the wheel and then ran `pip install <wheel>`, which resolves dependencies fresh against the ranges in `pyproject.toml` and ignores `uv.lock` entirely. Every build therefore floated to whatever was newest-compatible that day: the v1.8.0 image shipped `fastmcp 3.4.6` and v1.9.0 shipped `3.4.7`, an upgrade nobody requested and no release note mentioned, and rebuilding a released tag did not reproduce the released image. The builder stage now exports the locked, hashed dependency set (`uv export --frozen`), the runner installs that with `--require-hashes`, and the project wheel goes in with `--no-deps` so pip cannot re-resolve around it.
+- **`SSL_VERIFY=false` also covers `httpx2`** — the exemption is a monkey-patch on the HTTP client constructors, because it has to reach clients this codebase never builds (FastMCP creates its own for the JWKS fetch and the OAuth token exchange). It patched `httpx` only. FastMCP 4 moved to `httpx2` and dropped `httpx`, so on that upgrade the patch would have kept working for the server's own Viya calls while silently ceasing to cover FastMCP's — surfacing inside the auth layer as a 401 or connect error. Both are patched now, and `httpx2` is skipped when absent, so this is a no-op on 3.x. The patch moved out of `config.py` into `sas_mcp_server/ssl_patch.py` (keeping `config.py` declarative, per the #40 review) and gained the test coverage it never had, including the idempotency guard and the late-binding trap.
+
 ## [1.9.0] - 2026-08-11
 
 ### Added
