@@ -203,24 +203,26 @@ async def _resolve_source_bytes(file_path: str | None, url: str | None) -> tuple
     # url — fetch with a plain client (no Viya bearer on an external URL).
     assert url is not None
     try:
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, verify=SSL_VERIFY) as fetch_client:
-            async with fetch_client.stream("GET", url) as fetch_resp:
-                # Plain raise_for_status on purpose: this is an arbitrary caller-supplied
-                # URL, not Viya, so there is no vnd.sas.error+json body worth quoting
-                # and folding a third-party page into the message adds only noise.
-                fetch_resp.raise_for_status()
-                # Refuse on the declared size when there is one, but never trust
-                # it: the cap is enforced again while the body streams in, so an
-                # absent or lying Content-Length cannot blow past the limit.
-                declared = fetch_resp.headers.get("Content-Length")
-                if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
-                    return None, _source_too_large("url", int(declared))
-                buf = bytearray()
-                async for chunk in fetch_resp.aiter_bytes():
-                    buf += chunk
-                    if len(buf) > MAX_UPLOAD_BYTES:
-                        return None, _source_too_large("url", None)
-                return bytes(buf), None
+        async with (
+            httpx.AsyncClient(timeout=120.0, follow_redirects=True, verify=SSL_VERIFY) as fetch_client,
+            fetch_client.stream("GET", url) as fetch_resp,
+        ):
+            # Plain raise_for_status on purpose: this is an arbitrary caller-supplied
+            # URL, not Viya, so there is no vnd.sas.error+json body worth quoting
+            # and folding a third-party page into the message adds only noise.
+            fetch_resp.raise_for_status()
+            # Refuse on the declared size when there is one, but never trust
+            # it: the cap is enforced again while the body streams in, so an
+            # absent or lying Content-Length cannot blow past the limit.
+            declared = fetch_resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+                return None, _source_too_large("url", int(declared))
+            buf = bytearray()
+            async for chunk in fetch_resp.aiter_bytes():
+                buf += chunk
+                if len(buf) > MAX_UPLOAD_BYTES:
+                    return None, _source_too_large("url", None)
+            return bytes(buf), None
     except httpx.HTTPError as exc:
         return None, {"status": "fetch_failed", "url": url, "message": str(exc)}
 
