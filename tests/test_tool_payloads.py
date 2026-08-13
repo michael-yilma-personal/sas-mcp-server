@@ -2339,6 +2339,126 @@ async def test_upload_data_from_file_path(mcp_server_with_mock_client, tmp_path)
     assert result.data["rows_uploaded"] == 2
 
 
+async def test_upload_data_file_path_over_limit(mcp_server_with_mock_client, tmp_path, monkeypatch):
+    """A file over MAX_UPLOAD_BYTES is refused before any read or Viya call."""
+    from sas_mcp_server.tools import data_ops
+
+    mcp, mock_client = mcp_server_with_mock_client
+    monkeypatch.setattr(data_ops, "MAX_UPLOAD_BYTES", 16)
+    big = tmp_path / "big.csv"
+    big.write_bytes(b"a,b\n" + b"1,2\n" * 10)  # 44 bytes > 16
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "upload_data",
+            {
+                "server_id": "cas1",
+                "caslib_name": "Public",
+                "table_name": "T",
+                "file_path": str(big),
+            },
+        )
+    assert result.data["status"] == "source_too_large"
+    assert result.data["source"] == "file_path"
+    assert result.data["limit_bytes"] == 16
+    assert result.data["size_bytes"] == 44
+    mock_client.post.assert_not_called()
+
+
+async def test_upload_data_url_over_limit_by_content_length(mcp_server_with_mock_client, monkeypatch):
+    """A URL whose declared Content-Length exceeds the cap is refused up front."""
+    from sas_mcp_server.tools import data_ops
+
+    mcp, mock_client = mcp_server_with_mock_client
+    monkeypatch.setattr(data_ops, "MAX_UPLOAD_BYTES", 16)
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        return httpx.Response(200, content=b"x" * 32)  # Content-Length: 32
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler))
+    )
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "upload_data",
+            {
+                "server_id": "cas1",
+                "caslib_name": "Public",
+                "table_name": "T",
+                "url": "https://example.com/big.csv",
+            },
+        )
+    assert result.data["status"] == "source_too_large"
+    assert result.data["source"] == "url"
+    assert result.data["size_bytes"] == 32
+    mock_client.post.assert_not_called()
+
+
+async def test_upload_data_url_over_limit_while_streaming(mcp_server_with_mock_client, monkeypatch):
+    """Without a Content-Length, the cap is still enforced as the body streams in."""
+    from sas_mcp_server.tools import data_ops
+
+    mcp, mock_client = mcp_server_with_mock_client
+    monkeypatch.setattr(data_ops, "MAX_UPLOAD_BYTES", 16)
+    real_client = httpx.AsyncClient
+
+    async def chunks():
+        for _ in range(5):  # 40 bytes total, no Content-Length header
+            yield b"xxxxxxxx"
+
+    def handler(request):
+        return httpx.Response(200, content=chunks())
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler))
+    )
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "upload_data",
+            {
+                "server_id": "cas1",
+                "caslib_name": "Public",
+                "table_name": "T",
+                "url": "https://example.com/stream.csv",
+            },
+        )
+    assert result.data["status"] == "source_too_large"
+    assert result.data["source"] == "url"
+    assert "size_bytes" not in result.data  # size unknown when the header is absent
+    mock_client.post.assert_not_called()
+
+
+async def test_upload_data_from_url_under_limit(mcp_server_with_mock_client, monkeypatch):
+    """The url source streams the file and forwards the exact bytes to CAS."""
+    mcp, mock_client = mcp_server_with_mock_client
+    mock_client.post.return_value = _make_mock_response(
+        {"name": "T", "rowCount": 2, "columnCount": 2, "caslibName": "Public", "scope": "global"},
+        status_code=200,
+    )
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        return httpx.Response(200, content=b"a,b\n1,2\n3,4")
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler))
+    )
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "upload_data",
+            {
+                "server_id": "cas1",
+                "caslib_name": "Public",
+                "table_name": "T",
+                "url": "https://example.com/data.csv",
+            },
+        )
+    kwargs = mock_client.post.call_args[1]
+    assert kwargs["files"]["file"][1] == b"a,b\n1,2\n3,4"
+    assert result.data["status"] == "success"
+    assert result.data["source"] == "url"
+
+
 async def test_upload_data_file_path_not_found(mcp_server_with_mock_client):
     """A missing file returns a structured error and never calls Viya."""
     mcp, mock_client = mcp_server_with_mock_client

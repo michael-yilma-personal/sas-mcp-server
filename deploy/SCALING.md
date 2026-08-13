@@ -160,8 +160,41 @@ helm upgrade sas-mcp deploy/helm/sas-mcp-server -n sas-mcp --reuse-values \
 ```
 
 Lower `MAX_EXPORT_INLINE_BYTES` instead (or as well) if inline exports are not
-needed. `query_data` is bounded at 10,000 rows and `execute_sas_code` logs are
-paged, so exports are the outlier.
+needed.
+
+---
+
+## The three tools that buffer big payloads
+
+The "transient result buffers" term above is not abstract — it is three
+specific tools, and they are the only ones worth briefing users on. Everything
+else is bounded small: `query_data` caps at 10,000 rows, `get_castable_data`
+defaults to 100, and `execute_sas_code` logs are paged.
+
+| Tool | What is buffered in the pod | Bound |
+|---|---|---|
+| `export_report` | the whole binary export, then base64 (×1.33) plus JSON framing on top | `MAX_EXPORT_INLINE_BYTES`, default 25 MiB — the worst amplifier |
+| `upload_data` / `upload_file` (`file_path`/`url` sources) | the whole source file, held while it is re-posted to Viya | `MAX_UPLOAD_BYTES`, default 100 MiB |
+| `download_file` | the whole Files-service file | no code-side cap, but bounded in practice by Viya's own file-upload limit — everything in the Files service arrived under it |
+
+**`MAX_UPLOAD_BYTES` defaults to 100 MiB to match SAS Viya's default 100 MB
+file-upload limit**: a payload over the Viya cap would be refused upstream
+anyway, so buffering it in the pod would spend memory on a guaranteed failure.
+(Before this cap the `url` source was unbounded — one multi-GB fetch was an
+OOM kill in a single call.) The `url` source is refused up front on a declared
+`Content-Length`, and the cap is enforced again while the body streams in, so
+an absent or lying header cannot blow past it. **If your Viya administrator
+raises the Viya-side limit, raise `MAX_UPLOAD_BYTES` with it — and revisit the
+pod memory limit at the same time**, since a single upload can transiently
+hold roughly twice the payload size (the buffer plus the multipart body being
+posted).
+
+Practical guidance for teams sharing a deployment: route bulk data movement
+through SAS itself (`execute_sas_code`, path-based caslibs +
+`promote_table_to_memory`) rather than through the MCP response path, and keep
+inline report exports small or disabled. A deployment that does not need the
+file tools at all can drop them wholesale with `MCP_TIERS` (tier 2) — tools
+that are not registered cannot OOM anything.
 
 ---
 

@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 from fastmcp import Context, FastMCP
 
-from ..config import SSL_VERIFY, VIYA_ENDPOINT
+from ..config import MAX_UPLOAD_BYTES, SSL_VERIFY, VIYA_ENDPOINT
 from ..env import env_bool
 from ..viya_client import (
     contains_filter,
@@ -141,12 +141,34 @@ def _resolve_data_format(
     return fmt, None
 
 
+def _source_too_large(source: str, size_bytes: int | None) -> dict[str, Any]:
+    """Structured refusal for an upload source over ``MAX_UPLOAD_BYTES``."""
+    error: dict[str, Any] = {
+        "status": "source_too_large",
+        "source": source,
+        "limit_bytes": MAX_UPLOAD_BYTES,
+        "message": (
+            f"The {source} source exceeds the {MAX_UPLOAD_BYTES:,}-byte upload "
+            "limit (MAX_UPLOAD_BYTES; the default matches SAS Viya's 100 MB "
+            "file-upload cap, so a larger payload would be refused upstream "
+            "anyway). For large data, load it via a path-based caslib and "
+            "promote_table_to_memory, or ask the administrator to raise both limits."
+        ),
+    }
+    if size_bytes is not None:
+        error["size_bytes"] = size_bytes
+    return error
+
+
 async def _resolve_source_bytes(file_path: str | None, url: str | None) -> tuple[bytes | None, dict[str, Any] | None]:
     """Materialize the upload bytes server-side from ``file_path`` or ``url``.
 
     Assumes exactly one of the two is set (the caller's exactly-one-source
     guard). The bytes are read off the server's disk or fetched over HTTP, never
-    routed through the model context. Returns ``(bytes, None)`` or ``(None, error)``.
+    routed through the model context. Either source is refused past
+    ``MAX_UPLOAD_BYTES`` — the payload is held in memory in full while it is
+    re-posted to Viya, so the cap is what keeps one oversized source from
+    exhausting the process. Returns ``(bytes, None)`` or ``(None, error)``.
     """
     if file_path:
         if not env_bool("ALLOW_LOCAL_FILE_UPLOAD", True):
@@ -168,6 +190,9 @@ async def _resolve_source_bytes(file_path: str | None, url: str | None) -> tuple
                 ),
             }
         try:
+            size = path.stat().st_size
+            if size > MAX_UPLOAD_BYTES:
+                return None, _source_too_large("file_path", size)
             return path.read_bytes(), None
         except OSError as exc:
             return None, {
@@ -179,12 +204,23 @@ async def _resolve_source_bytes(file_path: str | None, url: str | None) -> tuple
     assert url is not None
     try:
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, verify=SSL_VERIFY) as fetch_client:
-            fetch_resp = await fetch_client.get(url)
-            # Plain raise_for_status on purpose: this is an arbitrary caller-supplied
-            # URL, not Viya, so there is no vnd.sas.error+json body worth quoting
-            # and folding a third-party page into the message adds only noise.
-            fetch_resp.raise_for_status()
-            return fetch_resp.content, None
+            async with fetch_client.stream("GET", url) as fetch_resp:
+                # Plain raise_for_status on purpose: this is an arbitrary caller-supplied
+                # URL, not Viya, so there is no vnd.sas.error+json body worth quoting
+                # and folding a third-party page into the message adds only noise.
+                fetch_resp.raise_for_status()
+                # Refuse on the declared size when there is one, but never trust
+                # it: the cap is enforced again while the body streams in, so an
+                # absent or lying Content-Length cannot blow past the limit.
+                declared = fetch_resp.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+                    return None, _source_too_large("url", int(declared))
+                buf = bytearray()
+                async for chunk in fetch_resp.aiter_bytes():
+                    buf += chunk
+                    if len(buf) > MAX_UPLOAD_BYTES:
+                        return None, _source_too_large("url", None)
+                return bytes(buf), None
     except httpx.HTTPError as exc:
         return None, {"status": "fetch_failed", "url": url, "message": str(exc)}
 
@@ -279,8 +315,10 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
         * ``url`` — the server fetches it over HTTP.
 
         Either way the bytes are read server-side and never pass through the calling
-        model's context window. To create a *small* table you are building inline (no
-        file or URL), use the ``upload_inline_data`` tool instead.
+        model's context window. Sources larger than ``MAX_UPLOAD_BYTES`` (default
+        100 MiB — SAS Viya's own default file-upload limit) are refused. To create a
+        *small* table you are building inline (no file or URL), use the
+        ``upload_inline_data`` tool instead.
 
         The casManagement uploadTable endpoint only accepts an uploaded file (multipart
         form-data) and has no URL parameter, so ``url`` is fetched and sent on as the
@@ -482,6 +520,9 @@ def register(mcp: FastMCP, get_token: Callable[[Context], Awaitable[str]]) -> No
           (in stdio mode that's your machine). Handles binary files (xlsx, zip,
           images) untouched. Disable with ``ALLOW_LOCAL_FILE_UPLOAD=false``.
         - ``url`` — an HTTP(S) URL the server fetches the file from. Also binary-safe.
+
+        ``file_path`` and ``url`` sources larger than ``MAX_UPLOAD_BYTES`` (default
+        100 MiB — SAS Viya's own default file-upload limit) are refused.
 
         ``parent_folder_uri`` files the upload into a Content folder (e.g.
         ``/folders/folders/{folderId}``) — the location ``%include``/``filesrvc``
