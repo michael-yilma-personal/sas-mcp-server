@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- **The server-side upload sources are no longer unbounded — `MAX_UPLOAD_BYTES`, default 100 MiB.** `upload_data` and `upload_file` with `file_path`/`url` buffer the entire source in process memory while it is re-posted to Viya, and the `url` source had no cap at all: one multi-GB fetch was an OOM kill in a single call — and an OOM kill is SIGKILL, so the lifespan never runs and every warm compute session leaks until Viya reaps it (this bit a real deployment). Both sources now refuse anything over `MAX_UPLOAD_BYTES` with a structured `source_too_large` error. The default matches SAS Viya's own 100 MB file-upload limit, on the logic that a bigger payload would be refused upstream anyway, so buffering it locally only spends memory on a guaranteed failure; administrators who raise the Viya-side limit raise the env var with it. The `url` source is refused up front on a declared `Content-Length` and the cap is enforced again while the body streams in, so an absent or lying header cannot blow past it. `deploy/SCALING.md` gains a section naming the three buffer-heavy tools (`export_report`, the `upload_data`/`upload_file` sources, `download_file`) and the bound on each; `MAX_UPLOAD_BYTES` and `MAX_EXPORT_INLINE_BYTES` are now documented in `.env.sample` and `examples/configuration.md`.
+
+### Fixed
+- **`deploy/K8S-DEPLOYMENT.md`'s inline manifest snippet now shows the 1Gi memory limit** the shipped manifest and Helm chart already default to. The stale `512Mi` in the snippet was exactly the limit a single large `export_report` can transiently exceed (see SCALING.md), and a deployment copied from the doc — rather than from `deploy/k8s/` or the chart — inherited the OOM-prone value.
+
 ## [1.9.2] - 2026-08-12
 
 ### Fixed

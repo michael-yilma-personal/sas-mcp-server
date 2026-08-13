@@ -118,6 +118,8 @@ The .env file used by the MCP Server allows for customizable options that the us
 | `ALLOW_RAW_BEARER` | No | `false` | When `true`, the HTTP-mode server also accepts a raw Viya access token in the `Authorization` header alongside the default OAuth2 PKCE flow. Useful for automation that already holds a Viya token. |
 | `VIYA_AUTH` | No | `true` | Master auth toggle. Set to `false` to disable SASLogon/OAuth handling (HTTP and stdio) and send Viya API calls without an `Authorization` header. |
 | `COMPUTE_SESSION_ID` | No | — | Fixed compute session id (for deployments without `/compute/contexts`). When set (e.g. `0001`), compute tools use that session directly. |
+| `MAX_UPLOAD_BYTES` | No | `104857600` (100 MiB) | Upper bound for the server-side upload sources (`upload_data`/`upload_file` with `file_path` or `url`). The default matches SAS Viya's 100 MB file-upload limit — if your administrator raises the Viya-side limit, raise this with it (see [deploy/SCALING.md](../deploy/SCALING.md)). |
+| `MAX_EXPORT_INLINE_BYTES` | No | `26214400` (25 MiB) | Upper bound for binary report exports returned inline by `export_report`; larger exports are refused with guidance. |
 | `SAS_CLI_CONFIG` | Stdio (optional) | `$HOME` | Parent directory for the SAS Viya CLI credential cache. The token is read from `$SAS_CLI_CONFIG/.sas/credentials.json`. |
 | `VIYA_USERNAME` | Tests only | — | Used by the integration test suite to acquire a token via the legacy `sas.cli` password grant. Not used by the MCP server itself. |
 | `VIYA_PASSWORD` | Tests only | — | See `VIYA_USERNAME`. |

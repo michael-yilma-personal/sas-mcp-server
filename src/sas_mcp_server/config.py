@@ -109,6 +109,16 @@ MCP_BASE_URL = _mcp_base_url if _mcp_base_url and not _mcp_base_url.startswith("
 # streamed through the model context (default 25 MiB).
 MAX_EXPORT_INLINE_BYTES = int(os.getenv("MAX_EXPORT_INLINE_BYTES", str(25 * 1024 * 1024)))
 
+# Upper bound on bytes accepted from the server-side upload sources
+# (``upload_data`` / ``upload_file`` with ``file_path`` or ``url``). The whole
+# source is buffered in memory while it is re-posted to Viya, so without a cap
+# one oversized URL fetch can OOM-kill the process. Default 100 MiB — SAS
+# Viya's own default file-upload limit — because a bigger payload would be
+# refused upstream anyway; if your Viya administrator raises the Viya-side
+# limit, raise this with it (and revisit the pod memory limit, see
+# deploy/SCALING.md).
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+
 if not VIYA_ENDPOINT:
     raise ConfigError(
         "VIYA_ENDPOINT is not set. Please set it in the environment variables."
