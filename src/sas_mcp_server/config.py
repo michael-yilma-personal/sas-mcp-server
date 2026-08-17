@@ -88,7 +88,8 @@ CONTEXT_NAME = os.getenv("COMPUTE_CONTEXT_NAME", "SAS Job Execution compute cont
 # Name advertised to MCP clients as serverInfo.name during the initialize
 # handshake. Clients label the server with this rather than the key in their own
 # config, so one server per Viya environment can be told apart.
-SERVER_NAME = os.getenv("MCP_SERVER_NAME", "SAS Viya Execution MCP Server")
+DEFAULT_SERVER_NAME = "SAS Viya Execution MCP Server"
+SERVER_NAME = os.getenv("MCP_SERVER_NAME", DEFAULT_SERVER_NAME)
 COMPUTE_SESSION_ID = os.getenv("COMPUTE_SESSION_ID", "").strip()
 # Optional tool-tier selection, e.g. "0-4" or "0,1,7". Empty means all tiers.
 # Parsed by sas_mcp_server.tools.resolve_enabled_tiers.

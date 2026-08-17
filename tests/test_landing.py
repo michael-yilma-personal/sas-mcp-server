@@ -152,6 +152,22 @@ def test_render_page_escapes_everything_dynamic():
     assert page.startswith("<!DOCTYPE html>")
 
 
+def test_render_page_headline_is_the_product_name():
+    """The headline is fixed; MCP_SERVER_NAME shows as a subtitle only when customised."""
+    from sas_mcp_server.config import DEFAULT_SERVER_NAME
+
+    default = render_page(_facts(server_name=DEFAULT_SERVER_NAME), nonce="n")
+    assert "<h1>SAS Viya MCP Server</h1>" in default
+    assert "<title>SAS Viya MCP Server</title>" in default
+    assert "Deployment:" not in default
+    assert "Execution" not in default
+
+    custom = render_page(_facts(server_name="Viya Prod <EU>"), nonce="n")
+    assert "<h1>SAS Viya MCP Server</h1>" in custom
+    assert "Deployment: <strong>Viya Prod &lt;EU&gt;</strong>" in custom
+    assert "<title>SAS Viya MCP Server · Viya Prod &lt;EU&gt;</title>" in custom
+
+
 def test_render_page_nonce_on_style_and_script_only():
     page = render_page(_facts(), nonce="N0NCE")
     assert '<style nonce="N0NCE">' in page

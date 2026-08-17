@@ -42,6 +42,7 @@ from typing import Any
 from starlette.responses import HTMLResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .config import DEFAULT_SERVER_NAME
 from .helpers.telemetry_helpers import server_version
 from .tools import ALL_TIERS, TIER_TITLES, TOOL_TIERS, resolve_enabled_tiers
 
@@ -65,6 +66,10 @@ _UNTIERED_TITLE = "Other tools"
 _SUMMARY_MAX = 200
 
 REPO_URL = "https://github.com/sassoftware/sas-mcp-server"
+# The page's headline is the product, not serverInfo.name: MCP_SERVER_NAME
+# exists so admins can tell deployments apart in a client's server list, and
+# it is shown as a subtitle only when someone actually set it.
+PAGE_TITLE = "SAS Viya MCP Server"
 
 
 # --- data --------------------------------------------------------------------
@@ -328,6 +333,7 @@ body {
 main { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
 header { margin-bottom: 28px; }
 h1 { font-size: 1.85rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+.deployment { margin: -4px 0 8px; color: var(--muted); }
 h2 { font-size: 1.25rem; margin: 36px 0 12px; }
 h3 { font-size: 1rem; margin: 20px 0 6px; }
 p { margin: 8px 0; }
@@ -448,7 +454,10 @@ def _render_tier(g: TierGroup, *, open_: bool) -> str:
 def render_page(facts: ServerFacts, *, nonce: str) -> str:
     """Render the full HTML document. *nonce* ties the inline style/script to
     the response's Content-Security-Policy."""
-    name = _e(facts.server_name)
+    name = _e(PAGE_TITLE)
+    custom_name = facts.server_name if facts.server_name != DEFAULT_SERVER_NAME else ""
+    deployment = f'<p class="deployment">Deployment: <strong>{_e(custom_name)}</strong></p>' if custom_name else ""
+    title = f"{PAGE_TITLE} · {custom_name}" if custom_name else PAGE_TITLE
     version = f'<span class="badge">v{_e(facts.version)}</span>' if facts.version else ""
     tiers_badge = (
         '<span class="badge">All tool tiers</span>'
@@ -520,13 +529,14 @@ def render_page(facts: ServerFacts, *, nonce: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{name}</title>
+<title>{_e(title)}</title>
 <style nonce="{nonce}">{_CSS}</style>
 </head>
 <body>
 <main>
 <header>
   <h1>{name}</h1>
+  {deployment}
   <p class="lede">A <a href="https://modelcontextprotocol.io/" rel="noopener">Model Context Protocol</a> server
   that lets AI assistants work with SAS Viya on your behalf — run SAS code, explore and query data,
   build reports, manage models and decisions — through the tools listed below.</p>
@@ -565,7 +575,7 @@ def render_page(facts: ServerFacts, *, nonce: str) -> str:
 {prompts_html}
 
 <footer>
-  <p>{name}{" · v" + _e(facts.version) if facts.version else ""} ·
+  <p>{_e(title)}{" · v" + _e(facts.version) if facts.version else ""} ·
   <a href="{REPO_URL}" rel="noopener">sassoftware/sas-mcp-server</a> on GitHub.</p>
   <p>Administrators: this page shows only the deployment's configuration and tool catalogue, never user data.
   Set <code>MCP_LANDING_PAGE=false</code> to switch it off and return the plain 401 to browsers.</p>
