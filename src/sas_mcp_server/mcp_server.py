@@ -10,15 +10,27 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import fastmcp
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .config import AUTH_ENABLED, SERVER_NAME, VIYA_ENDPOINT, viya_auth
+from .config import (
+    ALLOW_RAW_BEARER,
+    AUTH_ENABLED,
+    MCP_BASE_URL,
+    MCP_LANDING_PAGE,
+    MCP_READ_ONLY,
+    SERVER_NAME,
+    VIYA_ENDPOINT,
+    viya_auth,
+)
 from .exceptions import AuthenticationError
+from .landing import LandingPageMiddleware, ServerFacts, collect_facts
 from .prompts import register_prompts
 from .telemetry import install_telemetry
 from .tools import register_tools
@@ -102,4 +114,33 @@ async def _http_get_token(ctx: Context) -> str:
 register_tools(mcp, _http_get_token)
 register_prompts(mcp)
 
-app = mcp.http_app()
+# The path FastMCP mounts the MCP transport on ("/mcp" unless overridden via
+# FASTMCP_STREAMABLE_HTTP_PATH) — the landing page must answer on exactly it.
+MCP_PATH: str = fastmcp.settings.streamable_http_path
+
+
+async def _landing_facts() -> ServerFacts:
+    """Snapshot rendered by the browser landing page (called once, then cached
+    by the middleware — the catalogue is fixed for the process lifetime)."""
+    return await collect_facts(
+        mcp,
+        server_name=SERVER_NAME,
+        mcp_url=MCP_BASE_URL.rstrip("/") + MCP_PATH,
+        viya_endpoint=VIYA_ENDPOINT,
+        auth_enabled=AUTH_ENABLED,
+        allow_raw_bearer=ALLOW_RAW_BEARER,
+        read_only=MCP_READ_ONLY,
+    )
+
+
+# Starlette middleware wraps the router, so this runs BEFORE the
+# RequireAuthMiddleware FastMCP puts on the MCP route — the only place a
+# browser GET can be answered with a page instead of the 401. Everything that
+# is not `GET /mcp` + `Accept: text/html` is passed through untouched.
+_http_middleware: list[StarletteMiddleware] = []
+if MCP_LANDING_PAGE:
+    _http_middleware.append(
+        StarletteMiddleware(LandingPageMiddleware, path=MCP_PATH, facts=_landing_facts)
+    )
+
+app = mcp.http_app(middleware=_http_middleware or None)

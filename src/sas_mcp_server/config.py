@@ -88,7 +88,8 @@ CONTEXT_NAME = os.getenv("COMPUTE_CONTEXT_NAME", "SAS Job Execution compute cont
 # Name advertised to MCP clients as serverInfo.name during the initialize
 # handshake. Clients label the server with this rather than the key in their own
 # config, so one server per Viya environment can be told apart.
-SERVER_NAME = os.getenv("MCP_SERVER_NAME", "SAS Viya Execution MCP Server")
+DEFAULT_SERVER_NAME = "SAS Viya Execution MCP Server"
+SERVER_NAME = os.getenv("MCP_SERVER_NAME", DEFAULT_SERVER_NAME)
 COMPUTE_SESSION_ID = os.getenv("COMPUTE_SESSION_ID", "").strip()
 # Optional tool-tier selection, e.g. "0-4" or "0,1,7". Empty means all tiers.
 # Parsed by sas_mcp_server.tools.resolve_enabled_tiers.
@@ -98,6 +99,13 @@ MCP_TIERS = os.getenv("MCP_TIERS", "")
 # cuts across tiers, so this filters whichever tiers are enabled. Default OFF.
 # Classification lives in sas_mcp_server.tools._access.READ_ONLY_TOOLS.
 MCP_READ_ONLY = env_bool("MCP_READ_ONLY", False)
+# Browser landing page on the MCP endpoint (HTTP mode). A plain browser GET of
+# /mcp (Accept: text/html) gets an explanatory page with the tool catalogue and
+# client-config snippets instead of FastMCP's bare 401. Unauthenticated by
+# design and shows only deployment shape (name, version, Viya host, tiers,
+# tool names + one-line summaries) — set false to hide it and get the 401 back.
+# Rendering lives in sas_mcp_server.landing.
+MCP_LANDING_PAGE = env_bool("MCP_LANDING_PAGE", True)
 
 _mcp_base_url = os.getenv("MCP_BASE_URL", "").strip()
 # An empty value is the documented .env.sample default. Also ignore values

@@ -44,6 +44,10 @@ server:
   # Expose only tools that neither change server-side state nor cause
   # server-side work (43 of 75). Composes with `tiers`.
   readOnly: false
+  # Serve an explanatory HTML page (deployment summary, exposed tiers, client
+  # config snippets) to a browser that opens the /mcp URL, instead of the bare
+  # 401. Unauthenticated; shows deployment shape only. MCP clients unaffected.
+  landingPage: true
   # Accept a raw Viya token as a bearer, alongside the PKCE flow. Lets scripted
   # callers that already hold a Viya token skip the browser dance.
   #
