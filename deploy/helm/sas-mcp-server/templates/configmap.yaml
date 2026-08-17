@@ -18,6 +18,7 @@ data:
   ALLOW_LOCAL_FILE_UPLOAD: {{ .Values.server.allowLocalFileUpload | quote }}
   VIYA_AUTH: {{ .Values.server.authEnabled | quote }}
   MCP_READ_ONLY: {{ .Values.server.readOnly | quote }}
+  MCP_LANDING_PAGE: {{ .Values.server.landingPage | quote }}
   {{- /* toString, NOT `with`: Go templates treat the integer 0 as false, so
          `--set server.tiers=0` would drop this key entirely and the server
          would fall back to registering EVERY tier. */}}

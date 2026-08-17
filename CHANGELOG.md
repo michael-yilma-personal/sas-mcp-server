@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Opening the MCP endpoint in a browser now shows a landing page instead of a bare `401`.** A person handed `https://<host>/mcp` and curious enough to paste it into a browser used to get FastMCP's `{"error": "invalid_token", ...}` — which reads as "broken", not "not meant for browsers". A `GET` on the MCP path that asks for `text/html` now gets a self-contained page: what the server is, which SAS Viya it talks to, the tool tiers this deployment exposes (read-only mode and tier limits called out, one-line summary per tool, prompt templates), and copy-to-clipboard configuration for Claude Code, VS Code, Cursor, Claude connectors and generic `mcp.json` clients, each with the deployment's real endpoint URL (from `MCP_BASE_URL`) already filled in. Implemented as a Starlette middleware in front of FastMCP's router (`sas_mcp_server/landing.py`), because that is the only place a browser can be answered before the `RequireAuthMiddleware` FastMCP wraps around the MCP route. It keys on the `Accept` header, not the `User-Agent`: MCP clients advertise `application/json, text/event-stream`, browsers `text/html`, so the two never collide, and anything naming `text/event-stream` — or any `POST`, or a `*/*` `curl` — is passed through untouched. The page is unauthenticated by construction, so it shows deployment shape only (name, version, Viya host, tiers, tool names + summaries — the same catalogue any authenticated `tools/list` returns) and nothing derived from a request; it ships with a nonce-based `default-src 'none'` CSP, `noindex`, and `no-store`. `MCP_LANDING_PAGE=false` (`server.landingPage` in the Helm chart) hides it and returns the plain 401 to browsers.
+
 ## [1.9.3] - 2026-08-13
 
 ### Added

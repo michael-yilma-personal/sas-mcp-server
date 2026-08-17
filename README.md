@@ -299,6 +299,8 @@ Build and manage SAS Intelligent Decisioning rule sets and decision flows end to
 
 Example configurations are provided in the `examples/` folder. Below are quick-start snippets for common clients.
 
+> **Tip — open the endpoint in a browser.** In HTTP mode, pointing a browser at the MCP URL (e.g. `http://localhost:8134/mcp`, or `https://<host>/mcp` for a deployed server) shows a landing page instead of a bare `401`: what the server is, which SAS Viya it talks to, the tool tiers this deployment exposes with a one-line summary per tool, and ready-to-copy configuration for Claude Code, VS Code, Cursor, Claude connectors and generic `mcp.json` clients — with the deployment's real URL already filled in. Only a plain browser `GET` (`Accept: text/html`) is answered this way; MCP clients and `curl` see exactly what they saw before. The page is unauthenticated and shows deployment shape only (never user data); administrators can turn it off with `MCP_LANDING_PAGE=false`.
+
 ### VS Code / Cursor / Claude Code (`.vscode/mcp.json`)
 
 **HTTP mode** (requires `uv run app` running separately):
