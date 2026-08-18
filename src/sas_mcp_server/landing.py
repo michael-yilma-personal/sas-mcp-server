@@ -79,6 +79,19 @@ PAGE_TITLE = "SAS Viya MCP Server"
 class ToolEntry:
     name: str
     summary: str
+    # From the tool's MCP annotations (readOnlyHint / destructiveHint); None
+    # when the tool carries none, so the page never invents a classification.
+    read_only: bool | None = None
+    destructive: bool | None = None
+
+    @property
+    def kind(self) -> str:
+        """``"read-only"``, ``"destructive"``, ``"write"`` or ``""`` (unknown)."""
+        if self.read_only:
+            return "read-only"
+        if self.read_only is None and self.destructive is None:
+            return ""
+        return "destructive" if self.destructive else "write"
 
 
 @dataclass(frozen=True)
@@ -193,7 +206,15 @@ async def collect_facts(
 
     by_tier: dict[int | None, list[ToolEntry]] = {}
     for t in tools:
-        by_tier.setdefault(TOOL_TIERS.get(t.name), []).append(ToolEntry(name=t.name, summary=summarize(t.description)))
+        ann = getattr(t, "annotations", None)
+        by_tier.setdefault(TOOL_TIERS.get(t.name), []).append(
+            ToolEntry(
+                name=t.name,
+                summary=summarize(t.description),
+                read_only=getattr(ann, "readOnlyHint", None),
+                destructive=getattr(ann, "destructiveHint", None),
+            )
+        )
     groups: list[TierGroup] = []
     for tier in sorted(k for k in by_tier if k is not None):
         groups.append(
@@ -385,11 +406,24 @@ details summary .count { color: var(--muted); font-weight: 400; font-size: 0.9re
 details .tools { margin: 0; padding: 0 16px 12px; list-style: none; }
 details .tools li {
   padding: 6px 0; border-top: 1px solid var(--line);
-  display: grid; grid-template-columns: minmax(180px, 34%) 1fr; gap: 12px;
+  display: grid; grid-template-columns: minmax(180px, 32%) 6.5em 1fr; gap: 12px; align-items: baseline;
 }
 details .tools li code { background: none; padding: 0; }
 details .tools li span { color: var(--muted); font-size: 0.95rem; }
-@media (max-width: 600px) { details .tools li { grid-template-columns: 1fr; gap: 2px; } }
+details .tools li .kind {
+  font-style: normal; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); white-space: nowrap;
+}
+details .tools li .kind.read-only { color: var(--ok); }
+details .tools li .kind.destructive { color: var(--warn); }
+.legend { color: var(--muted); font-size: 0.9rem; margin: 6px 0 12px; }
+.legend .kind { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; font-style: normal; }
+.legend .kind.read-only { color: var(--ok); }
+.legend .kind.destructive { color: var(--warn); }
+@media (max-width: 600px) {
+  details .tools li { grid-template-columns: 1fr auto; gap: 2px 8px; }
+  details .tools li span { grid-column: 1 / -1; }
+}
 .steps { padding-left: 20px; }
 .steps li { margin: 6px 0; }
 footer {
@@ -441,7 +475,10 @@ def _render_snippet(s: ClientSnippet) -> str:
 
 def _render_tier(g: TierGroup, *, open_: bool) -> str:
     label = f"Tier {g.tier} — {g.title}" if g.tier is not None else g.title
-    items = "".join(f"<li><code>{_e(t.name)}</code><span>{_e(t.summary)}</span></li>" for t in g.tools)
+    items = "".join(
+        f'<li><code>{_e(t.name)}</code><em class="kind {_e(t.kind)}">{_e(t.kind)}</em><span>{_e(t.summary)}</span></li>'
+        for t in g.tools
+    )
     n = len(g.tools)
     return (
         f"<details{' open' if open_ else ''}>"
@@ -514,6 +551,16 @@ def render_page(facts: ServerFacts, *, nonce: str) -> str:
 
     snippets = "".join(_render_snippet(s) for s in client_snippets(facts.mcp_url))
     tier_html = "".join(_render_tier(g, open_=(i == 0)) for i, g in enumerate(facts.tiers))
+    kinds = {t.kind for g in facts.tiers for t in g.tools}
+    legend = (
+        '<p class="legend">Each tool advertises its behaviour to your client as MCP tool annotations — '
+        '<em class="kind read-only">read-only</em> tools only read; '
+        '<em class="kind write">write</em> tools add or start something; '
+        '<em class="kind destructive">destructive</em> tools can change or remove what already exists. '
+        "Clients use these to group tools and to decide when to ask you before running one.</p>"
+        if kinds - {""}
+        else ""
+    )
     prompt_items = "".join(f"<li><code>{_e(p.name)}</code><span>{_e(p.summary)}</span></li>" for p in facts.prompts)
     prompts_html = (
         f'<details><summary>Prompt templates<span class="count">{len(facts.prompts)}</span></summary>'
@@ -571,6 +618,7 @@ def render_page(facts: ServerFacts, *, nonce: str) -> str:
 
 <h2>What it can do</h2>
 {scope_para}
+{legend}
 {tier_html}
 {prompts_html}
 

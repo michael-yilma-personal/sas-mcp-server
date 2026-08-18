@@ -187,6 +187,19 @@ The definition is strict: a tool qualifies only if it can neither write nor star
 
 Classification is fail-closed: a tool that is not explicitly classified as read-only is withheld. The list lives in [`src/sas_mcp_server/tools/_access.py`](src/sas_mcp_server/tools/_access.py), and a test asserts it covers every registered tool, so a newly added tool cannot silently land in read-only mode.
 
+### Tool annotations (what clients are told)
+
+The same classification is **advertised** to every client as [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#tool-annotations) on each `tools/list` entry — whether or not read-only mode is on:
+
+| Hint | Derived from |
+|---|---|
+| `readOnlyHint` | exactly the read-only set above — one table, so what a client is told and what `MCP_READ_ONLY` enforces cannot drift |
+| `destructiveHint` | tools that can remove or overwrite existing state: arbitrary code (`execute_sas_code`, `submit_batch_job`), `delete_*`, `cancel_job`, `reset_compute_session`, the `update_*` PUTs, `apply_report_operations`, `create_report`/`copy_report` (their `replace` conflict policy), `publish_ml_champion_model` |
+| `idempotentHint` | reads, the `update_*` PUTs, deletes, `cancel_job`, `reset_compute_session`, `promote_table_to_memory` |
+| `openWorldHint` | only tools that can reach beyond Viya: arbitrary code and the upload tools' `url` source |
+
+Clients use these to shape their approval UX — e.g. Claude groups read-only tools for one-click approval and warns before destructive ones — and to decide when to interrupt the user. They are hints, not enforcement: the spec tells clients to treat them as untrusted unless the server is trusted, and `MCP_READ_ONLY` remains the server-side control. Without annotations a client must assume the spec's pessimistic defaults (writable, destructive, open-world) for every tool, so this only ever reduces friction. The browser landing page marks each tool `read-only` / `write` / `destructive` from the same hints.
+
 ### Available Tools
 
 The headings below match the numbered **tiers** above, so `MCP_TIERS` maps directly to the tools you expose (e.g. `MCP_TIERS=0-3` gives Tiers 0–3).

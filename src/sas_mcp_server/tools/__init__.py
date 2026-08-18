@@ -39,7 +39,15 @@ from . import (
     reports,
     workbench,
 )
-from ._access import READ_ONLY_TOOLS, WRITE_TOOLS, ReadOnlyGate
+from ._access import (
+    DESTRUCTIVE_TOOLS,
+    IDEMPOTENT_WRITE_TOOLS,
+    OPEN_WORLD_TOOLS,
+    READ_ONLY_TOOLS,
+    WRITE_TOOLS,
+    ReadOnlyGate,
+    annotations_for,
+)
 
 Registrar = Callable[[FastMCP, Callable[[Context], Awaitable[str]]], None]
 
@@ -76,25 +84,36 @@ TOOL_TIERS: dict[str, int] = {}
 
 
 class _TierRecorder:
-    """FastMCP stand-in that records which tier registered each tool.
+    """FastMCP stand-in that records which tier registered each tool and
+    stamps the tool's MCP annotations.
 
     Mirrors :class:`ReadOnlyGate`'s duck-typing so the tier modules stay
     unmodified, and composes with it (it wraps whichever target is in play).
-    Recording is a side effect only — every call is forwarded untouched.
+    Two things happen on the way through, neither visible to the tier:
+
+    * ``TOOL_TIERS[name] = tier`` — a side effect for telemetry and the landing
+      page.
+    * ``annotations=`` is filled in from :func:`annotations_for` (the central
+      read/write classification) unless the tier passed its own, so every tool
+      advertises ``readOnlyHint`` & co. to clients without any per-tool code.
     """
 
     def __init__(self, target: Any, tier: int) -> None:
         self._target = target
         self._tier = tier
 
+    def _record(self, name: str, kwargs: dict[str, Any]) -> None:
+        TOOL_TIERS[name] = self._tier
+        kwargs.setdefault("annotations", annotations_for(name))
+
     def tool(self, name_or_fn: Any = None, **kwargs: Any) -> Any:
         if callable(name_or_fn):  # bare @mcp.tool
-            TOOL_TIERS[kwargs.get("name") or name_or_fn.__name__] = self._tier
+            self._record(kwargs.get("name") or name_or_fn.__name__, kwargs)
             return self._target.tool(name_or_fn, **kwargs)
 
         def decorator(fn: Callable[..., Any]) -> Any:
             explicit = name_or_fn if isinstance(name_or_fn, str) else kwargs.get("name")
-            TOOL_TIERS[explicit or fn.__name__] = self._tier
+            self._record(explicit or fn.__name__, kwargs)
             return self._target.tool(name_or_fn, **kwargs)(fn)
 
         return decorator
@@ -191,9 +210,14 @@ def register_tools(
 
 __all__ = [
     "ALL_TIERS",
+    "DESTRUCTIVE_TOOLS",
+    "IDEMPOTENT_WRITE_TOOLS",
+    "OPEN_WORLD_TOOLS",
     "READ_ONLY_TOOLS",
     "TIER_TITLES",
+    "TOOL_TIERS",
     "WRITE_TOOLS",
+    "annotations_for",
     "register_tools",
     "resolve_enabled_tiers",
 ]

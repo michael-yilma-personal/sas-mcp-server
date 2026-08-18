@@ -25,12 +25,25 @@ jobs and leave run records; ``promote_table_to_memory`` mutates CAS state;
 both sets — a newly added one, say — is withheld in read-only mode rather than
 silently exposed. ``test_read_only.py`` asserts the two sets exactly partition
 the registered surface, so adding a tool without classifying it fails CI.
+
+**Advertised as well as enforced.** The same partition is published to clients
+as MCP *tool annotations* (spec revision 2025-03-26, "Tool annotations"):
+``readOnlyHint`` is derived from :data:`READ_ONLY_TOOLS` — one table, one
+truth — and the finer ``destructiveHint`` / ``idempotentHint`` /
+``openWorldHint`` come from the small sets below. Annotations are hints for the
+*client's* approval UX (group read-only tools, warn before destructive ones),
+not enforcement; ``MCP_READ_ONLY`` remains the enforcement, and the spec tells
+clients to treat hints as untrusted unless the server is trusted. Without them
+a client must assume the pessimistic defaults — writable, destructive,
+open-world — for every tool, ``list_caslibs`` included. See
+:func:`annotations_for`.
 """
 
 from collections.abc import Callable
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # --- classification ----------------------------------------------------------
 # Grouped by tier, matching src/sas_mcp_server/tools/<module>.py.
@@ -147,6 +160,98 @@ WRITE_TOOLS: frozenset[str] = frozenset(
 )
 
 
+# --- behaviour hints (MCP tool annotations) ----------------------------------
+# All three sets are subsets of WRITE_TOOLS (asserted in tests); a read-only
+# tool is by definition non-destructive, idempotent and — here — closed-world.
+
+# May remove or overwrite state that exists before the call. The spec's
+# contrast is "destructive updates" vs "only additive updates", so an update
+# that replaces an object's content counts, as does a create with a
+# name-conflict policy that can overwrite. Arbitrary code can do anything.
+DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
+    {
+        "execute_sas_code",  # arbitrary code
+        "submit_batch_job",  # arbitrary code
+        "reset_compute_session",  # destroys the caller's session
+        "cancel_job",  # kills a running job
+        "delete_report",
+        "delete_business_ruleset",
+        "delete_business_rule",
+        "delete_decision_flow",
+        "update_business_ruleset",  # PUT replaces the rule set's content
+        "update_business_rule",  # PUT replaces the rule's content
+        "update_decision_flow",  # PUT replaces the full flow
+        "apply_report_operations",  # operations can remove pages/objects
+        "create_report",  # on_conflict="replace" can overwrite a report
+        "copy_report",  # result_name_conflict="replace" likewise
+        "publish_ml_champion_model",  # re-publish replaces the destination module
+    }
+)
+
+# Repeating the call with the same arguments has no additional effect: PUTs
+# (the update_* tools), deletes of something already gone, cancelling a
+# cancelled job, and promote_table_to_memory's explicit already-loaded guard.
+# Everything else on the write side creates, uploads, or starts work anew each
+# time — or we could not verify otherwise, and the spec's default is "no".
+IDEMPOTENT_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "update_business_ruleset",
+        "update_business_rule",
+        "update_decision_flow",
+        "delete_report",
+        "delete_business_ruleset",
+        "delete_business_rule",
+        "delete_decision_flow",
+        "cancel_job",
+        "reset_compute_session",
+        "promote_table_to_memory",
+    }
+)
+
+# Can reach beyond the one authenticated Viya deployment: arbitrary SAS code
+# (PROC HTTP, FILENAME URL, ...) and the upload tools' `url` source. Every
+# other tool talks only to Viya, so its world is closed.
+OPEN_WORLD_TOOLS: frozenset[str] = frozenset(
+    {
+        "execute_sas_code",
+        "submit_batch_job",
+        "upload_data",
+        "upload_file",
+    }
+)
+
+# What an unclassified tool advertises: the spec's own pessimistic defaults,
+# stated explicitly rather than left implicit. test_read_only.py guarantees no
+# registered tool takes this path, so this is belt-and-braces, not a policy.
+_PESSIMISTIC = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+
+
+def annotations_for(name: str) -> ToolAnnotations:
+    """MCP tool annotations for *name*, derived from the classification above.
+
+    ``readOnlyHint`` mirrors :data:`READ_ONLY_TOOLS` exactly, so what a client
+    is told and what ``MCP_READ_ONLY`` enforces cannot drift apart. Unknown
+    names get the pessimistic defaults (fail closed).
+    """
+    if name in READ_ONLY_TOOLS:
+        return ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=name in OPEN_WORLD_TOOLS,
+        )
+    if name in WRITE_TOOLS:
+        return ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=name in DESTRUCTIVE_TOOLS,
+            idempotentHint=name in IDEMPOTENT_WRITE_TOOLS,
+            openWorldHint=name in OPEN_WORLD_TOOLS,
+        )
+    return _PESSIMISTIC.model_copy()
+
+
 # --- registration gate -------------------------------------------------------
 
 
@@ -195,4 +300,12 @@ class ReadOnlyGate:
         return getattr(self._mcp, item)
 
 
-__all__ = ["READ_ONLY_TOOLS", "WRITE_TOOLS", "ReadOnlyGate"]
+__all__ = [
+    "DESTRUCTIVE_TOOLS",
+    "IDEMPOTENT_WRITE_TOOLS",
+    "OPEN_WORLD_TOOLS",
+    "READ_ONLY_TOOLS",
+    "WRITE_TOOLS",
+    "ReadOnlyGate",
+    "annotations_for",
+]

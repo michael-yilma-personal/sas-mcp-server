@@ -222,6 +222,40 @@ def test_render_page_without_version_or_prompts():
     assert "Prompt templates" not in page
 
 
+def test_tool_entry_kind():
+    assert ToolEntry("a", "s").kind == ""  # no annotations → no claim
+    assert ToolEntry("a", "s", read_only=True, destructive=False).kind == "read-only"
+    assert ToolEntry("a", "s", read_only=False, destructive=False).kind == "write"
+    assert ToolEntry("a", "s", read_only=False, destructive=True).kind == "destructive"
+
+
+def test_render_page_shows_behaviour_markers_and_legend():
+    facts = _facts(
+        tiers=(
+            TierGroup(
+                tier=0,
+                title="T",
+                tools=(
+                    ToolEntry("execute_sas_code", "Run.", read_only=False, destructive=True),
+                    ToolEntry("list_caslibs", "List.", read_only=True, destructive=False),
+                    ToolEntry("upload_data", "Up.", read_only=False, destructive=False),
+                ),
+            ),
+        )
+    )
+    page = render_page(facts, nonce="n")
+    assert '<em class="kind destructive">destructive</em>' in page
+    assert '<em class="kind read-only">read-only</em>' in page
+    assert '<em class="kind write">write</em>' in page
+    assert 'class="legend"' in page and "MCP tool annotations" in page
+
+
+def test_render_page_without_annotations_makes_no_claims():
+    page = render_page(_facts(), nonce="n")  # fixture tools carry no hints
+    assert 'class="legend"' not in page
+    assert '<em class="kind "></em>' in page  # empty marker cell, nothing invented
+
+
 def test_tier_range_formatting():
     assert landing._tier_range(frozenset()) == ""
     assert landing._tier_range(frozenset({4})) == "4"
@@ -255,6 +289,9 @@ async def test_collect_facts_groups_registered_tools_by_tier():
     assert facts.tiers[0].title == tools.TIER_TITLES[0]
     names0 = {t.name for t in facts.tiers[0].tools}
     assert "execute_sas_code" in names0
+    by_name = {t.name: t for g in facts.tiers for t in g.tools}
+    assert by_name["execute_sas_code"].kind == "destructive"  # picked up from the tool's annotations
+    assert by_name["list_compute_contexts"].kind == "read-only"
     assert all(t.summary for t in facts.tiers[0].tools)  # every tool has a one-liner
     # sorted within a tier
     assert [t.name for t in facts.tiers[1].tools] == sorted(t.name for t in facts.tiers[1].tools)
