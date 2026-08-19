@@ -1,0 +1,309 @@
+# SAS Viya MCP Server — sample Kubernetes deployment for Contour, mounted under
+# a path prefix on the SAS Viya hostname.
+#
+# Serves the MCP endpoint at https://your-viya-server.com/sas-mcp/mcp, reusing
+# Viya's hostname, DNS record, load balancer and TLS certificate. Nothing new
+# has to be issued or approved — the cost is that the prefix has to be
+# rewritten away before the pod sees it, and that the OAuth discovery URLs do
+# not all move with it (see the routing section at the bottom).
+#
+# This file mirrors sas-mcp-server.yaml — the nginx, host-root variant — and
+# differs only in MCP_BASE_URL and the routing objects. Keep the two in step.
+# For anything beyond a sample, prefer the Helm chart in deploy/helm, which
+# renders exactly these objects from `ingress.controller: contour`.
+#
+# The Contour path-prefix pattern was contributed by GitHub user sasaom-sdksbe
+# from a working AKS deployment. See deploy/CONTOUR-DEPLOYMENT.md for the
+# reasoning and deploy/AKS-CONTOUR.md for what is specific to AKS.
+#
+# BEFORE APPLYING, do these four things — each is a hard requirement:
+#
+#   1. Create the signing-key secret (NEVER commit the value):
+#        kubectl -n sas-mcp create secret generic sas-mcp-server \
+#          --from-literal=signing-key="$(openssl rand -base64 32)"
+#      The server derives its JWT signing key from this deterministically, so
+#      every replica sharing it issues compatible tokens. Leaving it unset makes
+#      the server fall back to the literal string "default" — a publicly known
+#      value in an open-source repo, i.e. forgeable tokens.
+#
+#   2. Register the OAuth redirect URI in SASLogon for client `sas-mcp`:
+#        https://your-viya-server.com/sas-mcp/auth/callback
+#      Note the prefix: the server advertises its callback relative to
+#      MCP_BASE_URL. The browser PKCE flow dead-ends without it.
+#
+#   3. Find the Viya root HTTPProxy that owns the hostname and its certificate:
+#        kubectl -n <viya-namespace> get httpproxy
+#      It is conventionally called sas-httpproxy-root. The children below route
+#      nothing until it includes them — see the patch at the end of this file.
+#
+#   4. Confirm nothing else on this host already serves /authorize, /token,
+#      /register or /.well-known/oauth-authorization-server:
+#        kubectl get httpproxy -A
+#      Viya's own OAuth lives under /SASLogon/oauth/*, so these should be free —
+#      but this is a shared host, so verify rather than assume.
+#
+# Apply with:  kubectl apply -f sas-mcp-server-contour.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sas-mcp-server
+  namespace: sas-mcp
+data:
+  VIYA_ENDPOINT: https://your-viya-server.com
+  # MUST be the externally reachable URL. The server advertises its OAuth
+  # endpoints relative to this, so a wrong value sends clients somewhere that
+  # does not exist. No trailing path: the MCP app mounts at /mcp itself.
+  # Carries the path prefix: the OAuth endpoints, the callback and the
+  # landing page are all advertised relative to this. The pod still serves
+  # /mcp at its own root — Contour rewrites the prefix away below.
+  MCP_BASE_URL: https://your-viya-server.com/sas-mcp
+  # Self-signed Viya certificate (matches SSL_VERIFY=false in the local .env).
+  SSL_VERIFY: "false"
+  CLIENT_ID: sas-mcp
+  HOST_PORT: "8134"
+  COMPUTE_CONTEXT_NAME: SAS Job Execution compute context
+  MCP_SERVER_NAME: SAS Viya Execution MCP Server
+  # Accept a Viya token passed straight through as a bearer, alongside the PKCE
+  # flow. Useful for scripted callers that already hold a Viya token.
+  # NOTE what this accepts: the fallback verifier sets audience=[] with no
+  # required scopes, so ANY JWT this Viya's SASLogon signed works as a full MCP
+  # credential — including tokens minted for other clients. Set "false" to
+  # require the PKCE flow.
+  ALLOW_RAW_BEARER: "true"
+  # Refuse to read files off the server's own disk as an upload source.
+  # The application defaults this to TRUE; in a container that is a liability,
+  # because the server's disk is the pod — `file_path` would read
+  # /proc/self/environ (which holds MCP_SIGNING_KEY), the ServiceAccount token,
+  # or the OAuth store, with no allowlist. Nothing legitimate is lost: the
+  # `content` and `url` sources and upload_inline_data all still work.
+  ALLOW_LOCAL_FILE_UPLOAD: "false"
+  # Uncomment to narrow the exposed surface:
+  # MCP_TIERS: "0-4"
+  # MCP_READ_ONLY: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sas-mcp-server
+  namespace: sas-mcp
+# The server calls Viya over HTTPS and never touches the Kubernetes API. An API
+# token on disk is readable by anything that can read a path, so do not mount one.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sas-mcp-server
+  namespace: sas-mcp
+  labels:
+    app: sas-mcp-server
+spec:
+  # Keep at 1. Two things break at >1 and neither is fixable in this file:
+  #   * OAuth client registrations live in a per-pod file-tree store, so a client
+  #     registered on pod A is unknown to pod B.
+  #   * Warm Viya compute sessions are cached in-process, so the same user
+  #     hitting a different pod spins up a second session on Viya.
+  replicas: 1
+  strategy:
+    type: Recreate # the state volume below is RWO; avoid two pods holding it
+  selector:
+    matchLabels:
+      app: sas-mcp-server
+  template:
+    metadata:
+      labels:
+        app: sas-mcp-server
+    spec:
+      serviceAccountName: sas-mcp-server
+      automountServiceAccountToken: false
+      # The lifespan issues one DELETE per warm compute session on shutdown;
+      # allow time for that rather than leaking sessions on every rollout.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100 # `sas` in the published image
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sas-mcp-server
+          image: ghcr.io/sassoftware/sas-mcp-server:1.11.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8134
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sas-mcp-server
+          env:
+            - name: MCP_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sas-mcp-server
+                  key: signing-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # OAuth client registrations (a Fernet-encrypted file tree).
+            # REQUIRED under readOnlyRootFilesystem: OAuthProxy mkdirs this
+            # directory at import time, so without it the container crash-loops
+            # at startup — it does not start healthy and fail later.
+            - name: fastmcp-state
+              mountPath: /app/.local/share/fastmcp
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Sized for MAX_EXPORT_INLINE_BYTES (25 MiB): export_report returns
+          # that inline, base64-encoded (x1.33) and JSON-serialized on top, so
+          # one large export can transiently need several hundred MiB against a
+          # 152Mi idle baseline. An OOM is SIGKILL, so the lifespan never runs
+          # and every warm compute session leaks. No CPU limit on purpose — the
+          # workload is bursty and single-threaded, and a limit throttles the
+          # event loop. See SCALING.md.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        # emptyDir keeps registrations only for the pod's lifetime; swap for a
+        # PVC to survive restarts without forcing clients to re-register.
+        - name: fastmcp-state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sas-mcp-server
+  namespace: sas-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: sas-mcp-server
+  ports:
+    - name: http
+      port: 8134
+      targetPort: http
+      protocol: TCP
+---
+# --- Routing (Contour) -------------------------------------------------------
+#
+# Three child HTTPProxies, because three different rewrite behaviours are
+# needed. They carry no route conditions of their own: the root proxy's include
+# supplies the prefix, and stating it in both places would concatenate.
+#
+# What the pod actually serves, enumerated from the running app's route table
+# with MCP_BASE_URL=https://host/sas-mcp:
+#
+#   /mcp                                               the MCP endpoint
+#   /authorize /token /register /consent /auth/callback
+#   /.well-known/oauth-authorization-server            RFC 8414 doc, at the ROOT
+#   /.well-known/oauth-protected-resource/sas-mcp/mcp  RFC 9728 doc, prefix INSIDE
+#   /health
+#
+# What a client asks for, and what has to happen to it:
+#
+#   /sas-mcp/mcp                                     → strip the prefix
+#   /sas-mcp/{authorize,token,register,consent,auth/callback}
+#                                                    → strip the prefix
+#   /.well-known/oauth-protected-resource/sas-mcp/mcp → forward as-is
+#   /.well-known/oauth-authorization-server/sas-mcp   → rewrite (RFC 8414 §3)
+#   /.well-known/oauth-authorization-server           → forward as-is
+#   /{authorize,token,register}                       → forward as-is
+#
+# The last two exist for clients that resolve OAuth URLs against the host root
+# and ignore the issuer's path (VS Code builds them as
+# new URL("/authorize", issuer)). A conformant client never needs them.
+---
+# 1. The prefix route. Everything the server advertises relative to
+#    MCP_BASE_URL arrives here and has /sas-mcp stripped before the pod sees it.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: sas-mcp-server
+  namespace: sas-mcp
+spec:
+  routes:
+    - services:
+        - name: sas-mcp-server
+          port: 8134
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /sas-mcp
+            replacement: /
+      timeoutPolicy:
+        # MCP streamable HTTP holds long-lived connections and streams
+        # responses; Envoy's 15s default response timeout would cut a long SAS
+        # execution mid-call. idle still reaps a connection nothing flows on.
+        response: infinity
+        idle: 5m
+---
+# 2. The pass-through route, included at every path the pod already serves
+#    under the name the client asks for.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: sas-mcp-server-oauth
+  namespace: sas-mcp
+spec:
+  routes:
+    - services:
+        - name: sas-mcp-server
+          port: 8134
+---
+# 3. RFC 8414 §3 discovery. The client appends the issuer's path to the
+#    well-known segment; the pod serves that document at the bare path.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: sas-mcp-server-as-metadata
+  namespace: sas-mcp
+spec:
+  routes:
+    - services:
+        - name: sas-mcp-server
+          port: 8134
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /.well-known/oauth-authorization-server/sas-mcp
+            replacement: /.well-known/oauth-authorization-server
+#
+# --- Then delegate from the Viya root proxy ----------------------------------
+#
+# This cannot come from a manifest — the root proxy belongs to Viya. Run it
+# once, in this order: the bare /.well-known/oauth-authorization-server include
+# must precede the longer /sas-mcp-suffixed one.
+#
+#   kubectl -n <viya-namespace> patch httpproxy sas-httpproxy-root --type=json -p='[
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server", "namespace": "sas-mcp", "conditions": [{"prefix": "/sas-mcp"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-oauth", "namespace": "sas-mcp", "conditions": [{"prefix": "/.well-known/oauth-protected-resource/sas-mcp"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-oauth", "namespace": "sas-mcp", "conditions": [{"prefix": "/.well-known/oauth-authorization-server"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-oauth", "namespace": "sas-mcp", "conditions": [{"prefix": "/authorize"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-oauth", "namespace": "sas-mcp", "conditions": [{"prefix": "/token"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-oauth", "namespace": "sas-mcp", "conditions": [{"prefix": "/register"}]}},
+#     {"op": "add", "path": "/spec/includes/-", "value": {"name": "sas-mcp-server-as-metadata", "namespace": "sas-mcp", "conditions": [{"prefix": "/.well-known/oauth-authorization-server/sas-mcp"}]}}
+#   ]'
+#
+# Every proxy must then report "valid":
+#   kubectl -n sas-mcp get httpproxy
+#   kubectl -n <viya-namespace> get httpproxy sas-httpproxy-root

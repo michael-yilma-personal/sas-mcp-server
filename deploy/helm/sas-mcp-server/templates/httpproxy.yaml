@@ -1,0 +1,163 @@
+{{- if and .Values.ingress.enabled (eq .Values.ingress.controller "contour") -}}
+{{- $fullName := include "sas-mcp-server.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $prefix := include "sas-mcp-server.pathPrefix" . -}}
+{{- $c := .Values.ingress.contour -}}
+{{- /* Delegated: the chart renders CHILD proxies that a root proxy elsewhere
+       includes, and the include supplies each route's prefix condition — so
+       the children carry none of their own, or the two prefixes would
+       concatenate. Standalone: this proxy owns the FQDN, and every route
+       states its own condition. */ -}}
+{{- $delegated := not (empty $c.rootProxy.name) -}}
+{{- $resourceMeta := include "sas-mcp-server.resourceMetadataPath" . -}}
+{{- $asMeta := include "sas-mcp-server.asMetadataPath" . -}}
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+  {{- with $c.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not $delegated }}
+  # Standalone root proxy: this object owns the FQDN and terminates TLS with
+  # it. Only correct when the MCP server owns that hostname — two root proxies
+  # claiming one FQDN is a conflict Contour resolves against you. On a shared
+  # Viya host, set ingress.contour.rootProxy.* and delegate instead.
+  virtualhost:
+    fqdn: {{ .Values.ingress.host | quote }}
+    {{- if .Values.ingress.tls.enabled }}
+    tls:
+      # Contour requires this Secret in THIS namespace, or a
+      # TLSCertificateDelegation in the namespace that holds it.
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+    {{- end }}
+  {{- end }}
+  routes:
+  {{- if $prefix }}
+    # The MCP endpoint and every base-URL-relative OAuth endpoint
+    # ({{ $prefix }}/mcp, {{ $prefix }}/authorize, {{ $prefix }}/token,
+    # {{ $prefix }}/register, {{ $prefix }}/consent, {{ $prefix }}/auth/callback).
+    # The pod serves all of them at ITS root, so the prefix is rewritten away.
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      {{- if not $delegated }}
+      conditions:
+        - prefix: {{ $prefix }}
+      {{- end }}
+      pathRewritePolicy:
+        replacePrefix:
+          # Stated in full rather than inferred from the route condition: under
+          # delegation the condition lives on the parent's include, not here.
+          - prefix: {{ $prefix }}
+            replacement: /
+      timeoutPolicy:
+        {{- toYaml $c.timeoutPolicy | nindent 8 }}
+    {{- if and (not $delegated) .Values.ingress.oauthEnabled }}
+    # RFC 9728 resource metadata. The app derives this path from MCP_BASE_URL,
+    # so the prefix is INSIDE it and the pod serves it verbatim — no rewrite.
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      conditions:
+        - prefix: {{ $resourceMeta }}
+    # RFC 8414 §3: the client appends the issuer's path to the well-known
+    # segment. The pod serves the document at the bare well-known path, so this
+    # one is rewritten back to it.
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      conditions:
+        - prefix: {{ $asMeta }}
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: {{ $asMeta }}
+            replacement: /.well-known/oauth-authorization-server
+    {{- if $c.rootRelativeOAuth }}
+    # Clients that ignore the issuer's path and resolve these against the host
+    # root — VS Code builds them as new URL("/authorize", issuer). Unrewritten:
+    # the pod serves them at its root already.
+    {{- range list "/.well-known/oauth-authorization-server" "/authorize" "/token" "/register" }}
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      conditions:
+        - prefix: {{ . }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+  {{- else }}
+    # Host-root deployment: the pod's paths and the public paths are the same,
+    # so nothing is rewritten.
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      {{- if not $delegated }}
+      conditions:
+        - prefix: {{ .Values.ingress.mcpPath }}
+      {{- end }}
+      timeoutPolicy:
+        {{- toYaml $c.timeoutPolicy | nindent 8 }}
+    {{- if and (not $delegated) .Values.ingress.oauthEnabled }}
+    # OAuth endpoints: siblings of the MCP path at the host root, not children
+    # of it. The paths are fixed by the library and the server advertises
+    # exactly these URLs, so all of them must reach this Service.
+    {{- range .Values.ingress.oauthPaths }}
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      conditions:
+        - prefix: {{ . }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
+{{- if and $delegated $prefix .Values.ingress.oauthEnabled }}
+---
+# Included unrewritten at the OAuth paths that the pod already serves under the
+# name the client asks for: the RFC 9728 document (which carries the prefix
+# itself) and — with rootRelativeOAuth — the host-root endpoints that
+# path-ignoring clients construct.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: {{ $fullName }}-oauth
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+  {{- with $c.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  routes:
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+---
+# RFC 8414 §3 discovery: /.well-known/oauth-authorization-server{{ $prefix }}
+# rewritten to the path the pod serves. Separate object because it is the one
+# delegated route that needs a rewrite of its own.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: {{ $fullName }}-as-metadata
+  labels:
+    {{- include "sas-mcp-server.labels" . | nindent 4 }}
+  {{- with $c.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  routes:
+    - services:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: {{ $asMeta }}
+            replacement: /.well-known/oauth-authorization-server
+{{- end }}
+{{- end }}

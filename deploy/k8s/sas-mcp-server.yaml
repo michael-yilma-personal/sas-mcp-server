@@ -22,6 +22,10 @@
 #      Viya's own OAuth lives under /SASLogon/oauth/*, so these should be free —
 #      but this is a shared host, so verify rather than assume.
 #
+# Routed by ingress-nginx, at the host root. For Contour — and for mounting the
+# server under a path prefix on the Viya hostname, which reuses its certificate —
+# use sas-mcp-server-contour.yaml instead; see ../CONTOUR-DEPLOYMENT.md.
+#
 # Apply with:  kubectl apply -f sas-mcp-server.yaml
 ---
 apiVersion: v1

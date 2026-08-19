@@ -1,0 +1,128 @@
+name: Helm chart (lint, render, guards)
+
+# The chart renders two different router objects and fails the render on five
+# configurations that would produce valid-but-broken YAML. Neither is covered by
+# the Python suite, and both are exactly the kind of thing that rots quietly.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+      - "deploy/k8s/**"
+      - ".github/workflows/helm.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/helm/**"
+      - "deploy/k8s/**"
+      - ".github/workflows/helm.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/sas-mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Write the values files each mode needs
+        run: |
+          mkdir -p /tmp/v /tmp/g
+          # /tmp/g holds the values the GUARD tests start from: on its own it is
+          # an incomplete config that the chart is SUPPOSED to reject, so it must
+          # stay out of the render loops below.
+          cat > /tmp/g/base.yaml <<'EOF'
+          signingKey: {value: ci-only-not-a-real-key}
+          EOF
+          cat > /tmp/v/contour-delegated.yaml <<'EOF'
+          signingKey: {value: ci-only-not-a-real-key}
+          ingress:
+            host: viya.example.com
+            contour: {rootProxy: {name: sas-httpproxy-root, namespace: viya}}
+          EOF
+          cat > /tmp/v/contour-prefix.yaml <<'EOF'
+          signingKey: {value: ci-only-not-a-real-key}
+          ingress:
+            host: viya.example.com
+            pathPrefix: /sas-mcp
+            contour: {rootProxy: {name: sas-httpproxy-root, namespace: viya}}
+          EOF
+          cat > /tmp/v/contour-standalone.yaml <<'EOF'
+          signingKey: {value: ci-only-not-a-real-key}
+          ingress:
+            host: mcp.example.com
+            contour: {rootProxy: {name: "", namespace: ""}}
+          EOF
+          cat > /tmp/v/nginx.yaml <<'EOF'
+          signingKey: {value: ci-only-not-a-real-key}
+          ingress: {controller: nginx, className: nginx, host: viya.example.com}
+          EOF
+
+      - name: Lint
+        run: |
+          for f in /tmp/v/*.yaml; do
+            echo "== lint $f"
+            helm lint "$CHART" -f "$f"
+          done
+
+      - name: Render every mode, and check it is valid Kubernetes YAML
+        run: |
+          for f in /tmp/v/*.yaml; do
+            echo "== template $f"
+            helm template ci "$CHART" -n sas-mcp -f "$f" | tee /tmp/out.yaml | grep -c 'kind:'
+            python3 -c "import sys,yaml;[d for d in yaml.safe_load_all(open('/tmp/out.yaml')) if d]"
+          done
+
+      - name: The right router object, and only that one
+        run: |
+          set -e
+          nginx=$(helm template ci "$CHART" -n sas-mcp -f /tmp/v/nginx.yaml)
+          echo "$nginx" | grep -q 'kind: Ingress'
+          echo "$nginx" | grep -q 'kind: HTTPProxy' && { echo "nginx mode rendered an HTTPProxy"; exit 1; } || true
+          contour=$(helm template ci "$CHART" -n sas-mcp -f /tmp/v/contour-prefix.yaml)
+          echo "$contour" | grep -q 'kind: HTTPProxy'
+          echo "$contour" | grep -q 'kind: Ingress' && { echo "contour mode rendered an Ingress"; exit 1; } || true
+          # The prefix route, the RFC 8414 rewrite, and the pass-through child.
+          test "$(echo "$contour" | grep -c 'kind: HTTPProxy')" = 3
+          echo "$contour" | grep -q 'replacement: /$'
+          echo "$contour" | grep -q 'prefix: /.well-known/oauth-authorization-server/sas-mcp'
+          # MCP_BASE_URL must carry the prefix, or every advertised URL is wrong.
+          echo "$contour" | grep -q 'MCP_BASE_URL: "https://viya.example.com/sas-mcp"'
+
+      - name: Guards fail the render, with a message that says what to do
+        run: |
+          set -e
+          fails() {  # fails <name> <expected substring> <--set args...>
+            name="$1"; want="$2"; shift 2
+            if out=$(helm template ci "$CHART" -n sas-mcp -f /tmp/g/base.yaml "$@" 2>&1); then
+              echo "FAIL: $name rendered instead of failing"; exit 1
+            fi
+            case "$out" in
+              *"$want"*) echo "ok: $name" ;;
+              *) echo "FAIL: $name failed for the wrong reason:"; echo "$out"; exit 1 ;;
+            esac
+          }
+          fails "className with contour"        "ingress.controller=nginx"  --set ingress.className=nginx
+          fails "unknown controller"            'must be "contour" or "nginx"' --set ingress.controller=traefik
+          fails "pathPrefix with nginx"         "implemented for Contour only" --set ingress.controller=nginx --set ingress.className=nginx --set-string ingress.pathPrefix=/sas-mcp
+          fails "colliding pathPrefix"          "collides with a path"      --set-string ingress.pathPrefix=/mcp --set ingress.contour.rootProxy.namespace=viya
+          fails "root proxy without namespace"  "orphan"                    --set ingress.contour.rootProxy.namespace=
+          fails "moved mcpPath"                 "hardcodes /mcp"            --set-string ingress.mcpPath=/api --set ingress.contour.rootProxy.namespace=viya
+
+      - name: The sample manifests parse, and agree with the chart on the image tag
+        run: |
+          set -e
+          python3 -c "import yaml;[d for d in yaml.safe_load_all(open('deploy/k8s/sas-mcp-server.yaml')) if d]"
+          python3 -c "import yaml;[d for d in yaml.safe_load_all(open('deploy/k8s/sas-mcp-server-contour.yaml')) if d]"
+          app=$(grep '^appVersion:' "$CHART/Chart.yaml" | cut -d'"' -f2)
+          for f in deploy/k8s/sas-mcp-server.yaml deploy/k8s/sas-mcp-server-contour.yaml; do
+            grep -q "sas-mcp-server:${app}" "$f" || { echo "$f does not pin the chart's appVersion ${app}"; exit 1; }
+          done

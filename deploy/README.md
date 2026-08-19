@@ -11,13 +11,24 @@ configuring Viya auth and connecting MCP clients, see
 
 ### Kubernetes artifacts
 
-Two equivalent ways in, both serving the MCP endpoint at
-`https://<viya-host>/mcp`:
-
 | | Path | Use when |
 |---|---|---|
-| **Sample manifest** | `k8s/sas-mcp-server.yaml` | One environment, values edited in place. Read this first — it is the clearest statement of what gets deployed. |
-| **Helm chart** | `helm/sas-mcp-server/` | Several environments, or the settings belong in a values file. |
+| **Sample manifest (nginx)** | `k8s/sas-mcp-server.yaml` | One environment, values edited in place, host root. Read this first — it is the clearest statement of what gets deployed. |
+| **Sample manifest (Contour)** | `k8s/sas-mcp-server-contour.yaml` | Same, but routed by Contour and mounted under a path prefix on the Viya hostname. |
+| **Helm chart** | `helm/sas-mcp-server/` | Several environments, or the settings belong in a values file. Renders either router. |
+
+### Which router
+
+The chart renders **one** of two objects, chosen by `ingress.controller`:
+
+| `ingress.controller` | Renders | Notes |
+|---|---|---|
+| `contour` *(default)* | `projectcontour.io/v1` `HTTPProxy` | Delegated from an existing root proxy (SAS Viya deploys one) or standalone. The only mode that can mount the server under a **path prefix**, reusing the Viya hostname and certificate. See [`CONTOUR-DEPLOYMENT.md`](CONTOUR-DEPLOYMENT.md). |
+| `nginx` | `networking.k8s.io/v1` `Ingress` | Exactly what chart 0.1.x rendered, annotations and all. Set `ingress.className: nginx` with it. |
+
+Chart 0.2.0 flipped the default from nginx to Contour. An unchanged 0.1.x values
+file **fails the render** with an explanatory message rather than silently
+dropping your `Ingress` — set `ingress.controller: nginx` to stay as you were.
 
 The chart's defaults are the safe general-purpose ones. Keep anything specific
 to your environment — the Viya endpoint, the OAuth client id, the ingress host,
@@ -40,6 +51,12 @@ Why the manifests look the way they do — worth reading before changing them:
 - [`K8S-DEPLOYMENT.md`](K8S-DEPLOYMENT.md) — what had to be true before this
   could go behind an ingress: the signing key, the OAuth state store, the dev
   auto-reloader, and the in-process session cache.
+- [`CONTOUR-DEPLOYMENT.md`](CONTOUR-DEPLOYMENT.md) — Contour specifics:
+  delegation from the Viya root proxy, mounting under a path prefix, and the
+  exact routing every OAuth discovery URL needs.
+- [`AKS-CONTOUR.md`](AKS-CONTOUR.md) — what is different on Azure: ACR
+  mirroring, the load balancer's 4-minute idle timeout, hairpin DNS to the Viya
+  hostname, and zonal storage.
 - [`SCALING.md`](SCALING.md) — how resources track user count, measured against
   a live deployment. Short version: the MCP pod is not what you scale.
 
@@ -222,10 +239,15 @@ and clients re-register; `persistence.type=pvc` keeps them.
 compute session. Measured 2.4 s with none cached; with many warm users this
 scales with Viya latency, and the 30 s default would leak sessions on rollout.
 
-**nginx timeout and buffering annotations.** MCP streamable HTTP holds
-long-lived connections. nginx's 60 s default read timeout would cut a long SAS
-execution mid-call, and default buffering would stall streamed output until the
-response completed.
+**Router timeouts, in both flavours.** MCP streamable HTTP holds long-lived
+connections and streams responses. nginx's 60 s default read timeout would cut a
+long SAS execution mid-call and its default buffering would stall streamed
+output until the response completed, so the chart sets
+`proxy-read-timeout`/`proxy-send-timeout`/`proxy-buffering: off`. Envoy behind
+Contour has the same problem sooner — a 15 s default response timeout — so the
+Contour routes carry `timeoutPolicy: {response: infinity, idle: 5m}` instead.
+Whatever sits in front of the cluster needs the same treatment; on AKS that is
+the load balancer's 4-minute TCP idle timeout.
 
 **No node affinity or tolerations.** The other workloads on this cluster pin to
 the `app=llm` node pool because they are GPU model servers. This is a light
@@ -277,27 +299,32 @@ warn if the combination looks wrong.
 
 ---
 
-## Alternative: everything under `/mcp`
+## Alternative: mount under a path prefix
 
-If claiming root paths on the Viya host is unacceptable, the server can instead
-serve *everything* under `/mcp`, leaving only one root path in play. This needs
-a small code change — `mcp_server.py` currently hardcodes `mcp.http_app()`:
+If claiming seven root paths on the Viya host is unacceptable — or if a second
+hostname would mean a new certificate and a new DNS record you cannot get
+approved — mount the server under a prefix instead:
+`https://<viya-host>/sas-mcp/mcp`. Set `ingress.pathPrefix: /sas-mcp` with
+`ingress.controller: contour` (`k8s/sas-mcp-server-contour.yaml` is the same
+thing as a plain manifest).
 
-```python
-app = mcp.http_app(path="/")            # mount at the root of the container
-```
+**No code change is needed.** `MCP_BASE_URL` carries the prefix, so the server
+advertises `…/sas-mcp/authorize`, `…/sas-mcp/token`, `…/sas-mcp/register`,
+`…/sas-mcp/consent` and `…/sas-mcp/auth/callback`, and the router strips the
+prefix before the pod — which still serves everything at its own root — sees the
+request.
 
-with `MCP_BASE_URL=https://<host>/mcp` and an ingress that strips the prefix
-(`nginx.ingress.kubernetes.io/rewrite-target: /$2`, path `/mcp(/|$)(.*)`, the
-pattern the other deployments on this cluster already use).
+**Two root paths remain**, and no configuration can move them: RFC 9728 places
+protected-resource metadata at the host root
+(`/.well-known/oauth-protected-resource/sas-mcp/mcp` — the prefix goes *inside*
+the path), and RFC 8414 does the same for authorization-server metadata. A third
+route is needed because the app serves that second document at the bare
+`/.well-known/oauth-authorization-server` while RFC 8414 §3 clients ask for it
+with the issuer's path appended.
 
-Tested: the OAuth endpoints then advertise as `https://<host>/mcp/authorize`,
-`/mcp/token`, `/mcp/register`. **One root path still remains** —
-`/.well-known/oauth-protected-resource/mcp/` — because RFC 9728 places
-protected-resource metadata at the host root by design, and FastMCP follows it.
-
-So this trades seven root paths for one, at the cost of a code change. Worth
-doing if the collision check turns up trouble; not worth doing pre-emptively.
+So this trades seven root paths for two — three routes in total, plus optional
+host-root aliases for clients that ignore the issuer path. The chart renders all
+of them; [`CONTOUR-DEPLOYMENT.md`](CONTOUR-DEPLOYMENT.md) explains each one.
 
 A third option avoids the OAuth paths entirely: set `ingress.oauthEnabled=false`
 and have clients pass a Viya token directly (`ALLOW_RAW_BEARER=true`, already on
