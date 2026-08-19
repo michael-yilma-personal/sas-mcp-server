@@ -98,35 +98,68 @@ signingKey:
 # ---------------------------------------------------------------------------
 # Ingress
 #
-# The MCP endpoint lands at https://<host><mcpPath>. The OAuth endpoints are
-# siblings of it at the HOST ROOT, not children — the paths are fixed by the
-# library, so they are listed explicitly under `oauthPaths` and every one of
-# them must reach this service or the PKCE flow breaks.
+# The MCP endpoint lands at https://<host><pathPrefix><mcpPath>. The OAuth
+# endpoints are NOT all children of it — the server advertises them relative to
+# MCP_BASE_URL, and the two .well-known documents live at the HOST ROOT by RFC.
+# Every one of the routes the chart renders must reach this Service or the
+# browser PKCE flow breaks. Verified against the running app's route table.
 #
-# Before enabling, confirm nothing else on this host already serves those
-# paths. Viya's own OAuth is under /SASLogon/oauth/*, so they should be free.
+# `controller` decides WHICH object the chart renders:
+#
+#   contour  projectcontour.io/v1 HTTPProxy — either delegated from a root
+#            proxy that already owns the hostname and its TLS certificate (SAS
+#            Viya deploys one, conventionally `sas-httpproxy-root`), or a
+#            standalone root proxy that owns the FQDN itself. Contour is the
+#            only mode that can mount the server under a path prefix.
+#   nginx    networking.k8s.io/v1 Ingress, exactly as chart 0.1.x rendered it.
+#
+# UPGRADING FROM CHART 0.1.x: the default flipped from nginx to contour. Set
+# `ingress.controller: nginx` to keep what you had. The chart fails the render
+# when `ingress.className` is set while the controller is not nginx, so an
+# nginx values file cannot silently become a Contour deployment.
 # ---------------------------------------------------------------------------
 ingress:
   enabled: true
-  className: nginx
+  # contour | nginx
+  controller: contour
   host: your-viya-server.com
+  # Mount the server under a path prefix on `host` instead of at the host root
+  # — e.g. "/sas-mcp" puts the MCP endpoint at https://host/sas-mcp/mcp.
+  #
+  # WHY: it reuses the Viya hostname, its DNS record, its load balancer and its
+  # TLS certificate, so no new certificate has to be approved and issued. That
+  # is usually the difference between "deployed this week" and "deployed next
+  # quarter" in an enterprise.
+  #
+  # WHAT IT COSTS: the pod still serves /mcp at ITS root, so the prefix has to
+  # be rewritten away, and the OAuth discovery URLs do not all move with it
+  # (see ingress.contour.rootRelativeOAuth). Contour only — the chart fails the
+  # render if this is set with controller=nginx.
+  pathPrefix: ""
   # FIXED, not a knob. mcp_server.py does `app = mcp.http_app()` with no path
   # argument, so the app serves /mcp and no env var can move it; pointing the
   # ingress elsewhere would just 404. The chart fails the render rather than
   # let you set a value that silently cannot work.
   mcpPath: /mcp
-  # Externally reachable base URL. Normally derived from `host` + TLS; set this
-  # only when the ingress is disabled and clients reach the Service some other
-  # way (a parent gateway, a port-forward). Never leave it as localhost for a
-  # cluster deployment — every OAuth endpoint is advertised relative to it.
+  # Externally reachable base URL. Normally derived from `host` + `pathPrefix`
+  # + TLS; set this only when the ingress is disabled and clients reach the
+  # Service some other way (a parent gateway, a port-forward). Never leave it
+  # as localhost for a cluster deployment — every OAuth endpoint is advertised
+  # relative to it.
   baseUrlOverride: ""
   tls:
+    # Ignored in Contour delegated mode: TLS belongs to the root proxy that
+    # owns the FQDN, and the chart's children inherit it.
     enabled: true
     secretName: viya-tls-certs
   # Set false if the browser PKCE flow is not needed — e.g. every client passes
   # a Viya token directly with server.allowRawBearer=true. That collapses the
-  # ingress to the single mcpPath rule and claims nothing at the host root.
+  # routing to the MCP endpoint alone and claims nothing at the host root.
   oauthEnabled: true
+  # The OAuth paths the app serves at its own root, used verbatim when
+  # pathPrefix is empty. With a pathPrefix set the chart derives the routes
+  # instead (the resource-metadata path carries the prefix, the
+  # authorization-server one does not) and this list is not used.
   oauthPaths:
     - /.well-known/oauth-protected-resource/mcp
     - /.well-known/oauth-authorization-server
@@ -135,6 +168,53 @@ ingress:
     - /register
     - /consent
     - /auth/callback
+
+  # --- controller: contour ---------------------------------------------------
+  contour:
+    # Delegate from an existing root HTTPProxy that owns the hostname and its
+    # certificate — the normal case on a shared Viya host. Leave `name` empty
+    # to have the chart render a STANDALONE root proxy that claims the FQDN
+    # itself (only correct when the MCP server owns that hostname; two root
+    # proxies for one FQDN is a conflict Contour resolves against you).
+    #
+    # Helm cannot add the includes to someone else's root proxy, so the chart
+    # renders the children and prints the exact `kubectl patch` for the root in
+    # NOTES. See deploy/CONTOUR-DEPLOYMENT.md.
+    rootProxy:
+      name: sas-httpproxy-root
+      # Namespace of that root proxy — the Viya namespace, not this one.
+      # Required whenever `name` is set; the chart fails the render otherwise,
+      # because a child nobody includes is an orphan that routes nothing.
+      namespace: ""
+    # Also route /.well-known/oauth-authorization-server, /authorize, /token
+    # and /register at the HOST ROOT, unprefixed.
+    #
+    # Only relevant with a pathPrefix. The server advertises those three
+    # endpoints WITH the prefix, and a spec-conformant client uses what it is
+    # given — but some clients (VS Code, and Claude in some versions) build
+    # them as new URL("/authorize", issuer), which drops the issuer's path, and
+    # some fetch the authorization-server document from the bare root. Without
+    # these routes those clients fail at sign-in.
+    #
+    # It claims paths at the SHARED host root, so confirm nothing else serves
+    # them (Viya's own OAuth is under /SASLogon/oauth/*, so they should be
+    # free). Set false if every client you support is conformant.
+    rootRelativeOAuth: true
+    # MCP streamable HTTP holds long-lived connections and streams responses;
+    # Envoy's 15s default response timeout would cut a long SAS execution
+    # mid-call. "infinity" disables the response timeout; idle still reaps a
+    # connection on which nothing flows in either direction.
+    timeoutPolicy:
+      response: infinity
+      idle: 5m
+    # Extra annotations on the rendered HTTPProxy objects.
+    annotations: {}
+
+  # --- controller: nginx -----------------------------------------------------
+  # Deliberately EMPTY rather than "nginx": a non-empty default would let a
+  # 0.1.x values file that names an ingress class render as Contour without a
+  # word. Setting it is what tells the chart you mean nginx.
+  className: ""
   annotations:
     # MCP streamable HTTP holds long-lived connections and streams responses.
     # nginx's 60s default read timeout would cut a long SAS execution mid-call;

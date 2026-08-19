@@ -3,7 +3,7 @@ name: sas-mcp-server
 description: Model Context Protocol server for SAS Viya — execute SAS code, query Compute and CAS, manage models and reports.
 type: application
 # Chart version, bumped independently of the server.
-version: 0.1.6
+version: 0.2.0
 # Server version this chart defaults to deploying.
 appVersion: "1.11.0"
 home: https://github.com/sassoftware/sas-mcp-server

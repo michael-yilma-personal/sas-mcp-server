@@ -5,10 +5,71 @@ MCP endpoint:
     {{ include "sas-mcp-server.baseUrl" . }}{{ .Values.ingress.mcpPath }}
 
 Point an MCP client at that URL. It will discover the OAuth endpoints on its
-own from {{ include "sas-mcp-server.baseUrl" . }}/.well-known/oauth-protected-resource{{ .Values.ingress.mcpPath }}
+own from {{ if .Values.ingress.baseUrlOverride }}{{ .Values.ingress.baseUrlOverride | trimSuffix "/" }}{{ else if .Values.ingress.enabled }}{{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}{{ else }}{{ include "sas-mcp-server.baseUrl" . }}{{ end }}{{ include "sas-mcp-server.resourceMetadataPath" . }}
+(that document lives at the HOST ROOT even when the server is mounted under a
+path prefix — the prefix moves INSIDE the path, it does not move the .well-known).
 {{- else -}}
 Ingress is disabled. Reach the server in-cluster at:
     http://{{ include "sas-mcp-server.fullname" . }}:{{ .Values.service.port }}/mcp
+{{- end }}
+
+{{ if and .Values.ingress.enabled (eq .Values.ingress.controller "contour") -}}
+{{- $fullName := include "sas-mcp-server.fullname" . -}}
+{{- $prefix := include "sas-mcp-server.pathPrefix" . -}}
+{{- $c := .Values.ingress.contour -}}
+{{- if $c.rootProxy.name -}}
+{{- /* Build the include list in the order it must be applied: the bare
+       well-known prefix before the longer RFC 8414 one. */ -}}
+{{- $includes := list -}}
+{{- if $prefix -}}
+{{- $includes = append $includes (dict "name" $fullName "prefix" $prefix) -}}
+{{- if .Values.ingress.oauthEnabled -}}
+{{- $includes = append $includes (dict "name" (printf "%s-oauth" $fullName) "prefix" (printf "/.well-known/oauth-protected-resource%s" $prefix)) -}}
+{{- if $c.rootRelativeOAuth -}}
+{{- range list "/.well-known/oauth-authorization-server" "/authorize" "/token" "/register" -}}
+{{- $includes = append $includes (dict "name" (printf "%s-oauth" $fullName) "prefix" .) -}}
+{{- end -}}
+{{- end -}}
+{{- $includes = append $includes (dict "name" (printf "%s-as-metadata" $fullName) "prefix" (include "sas-mcp-server.asMetadataPath" .)) -}}
+{{- end -}}
+{{- else -}}
+{{- $includes = append $includes (dict "name" $fullName "prefix" .Values.ingress.mcpPath) -}}
+{{- if .Values.ingress.oauthEnabled -}}
+{{- range .Values.ingress.oauthPaths -}}
+{{- $includes = append $includes (dict "name" $fullName "prefix" .) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+STILL TO DO — these are CHILD proxies. Until the root proxy includes them they
+route nothing, and `kubectl get httpproxy` reports them as orphaned. Helm
+cannot patch a resource it does not own, so run this once:
+
+    kubectl -n {{ $c.rootProxy.namespace }} patch httpproxy {{ $c.rootProxy.name }} --type=json -p='[
+{{- range $i, $inc := $includes }}
+      {"op": "add", "path": "/spec/includes/-", "value": {"name": "{{ $inc.name }}", "namespace": "{{ $.Release.Namespace }}", "conditions": [{"prefix": "{{ $inc.prefix }}"}]}}{{ if lt (add1 $i) (len $includes) }},{{ end }}
+{{- end }}
+    ]'
+
+Apply them in the order shown{{ if $prefix }} — the bare
+/.well-known/oauth-authorization-server include must precede the longer
+{{ include "sas-mcp-server.asMetadataPath" . }} one, so the RFC 8414 route wins
+for the suffixed URL{{ end }}. Then confirm Contour accepted the graph:
+
+    kubectl -n {{ .Release.Namespace }} get httpproxy
+    kubectl -n {{ $c.rootProxy.namespace }} get httpproxy {{ $c.rootProxy.name }}
+
+Every proxy must read "valid". A child that says "orphaned" is not included; a
+root that says "invalid" usually means a duplicate include condition.
+{{- if .Values.ingress.tls.enabled }}
+
+NOTE: ingress.tls is ignored in delegated mode — the root proxy owns the
+certificate for {{ .Values.ingress.host }}. It still selects https for MCP_BASE_URL.
+{{- end }}
+{{- else }}
+NOTE: no ingress.contour.rootProxy.name is set, so the chart rendered a
+STANDALONE root HTTPProxy claiming {{ .Values.ingress.host }}. If SAS Viya
+already owns that FQDN, this conflicts with its root proxy — delegate instead.
+{{- end }}
 {{- end }}
 
 Check it is up:

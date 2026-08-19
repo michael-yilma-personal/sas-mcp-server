@@ -246,6 +246,12 @@ HTTPS for production` — so **TLS terminates at the ingress**, and the ingress 
 
 ## Reference manifest
 
+> Since this investigation: the shipped artifacts are `deploy/k8s/sas-mcp-server.yaml`
+> (nginx, host root), `deploy/k8s/sas-mcp-server-contour.yaml` (Contour, mounted under a
+> path prefix) and the Helm chart, which renders either router from
+> `ingress.controller`. See [`CONTOUR-DEPLOYMENT.md`](CONTOUR-DEPLOYMENT.md) and
+> [`AKS-CONTOUR.md`](AKS-CONTOUR.md).
+
 Illustrative, to make the findings concrete — not a supported artifact. Single replica,
 restricted security context, with the volume that finding 2 requires.
 

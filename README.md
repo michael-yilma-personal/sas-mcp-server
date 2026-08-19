@@ -32,7 +32,7 @@ Here you can find getting articles on how to use and integrate the SAS MCP Serve
 
 - Optional
     - [Docker](https://docs.docker.com/engine/install): refer to [container setup](/deploy/docker.md)
-    - Kubernetes: sample manifest and Helm chart in [deploy/](/deploy/README.md)
+    - Kubernetes: sample manifests (Contour or nginx) and a Helm chart in [deploy/](/deploy/README.md)
 
 ### Installation
 
@@ -137,7 +137,7 @@ If your compute deployment does not expose `/compute/contexts` and only supports
 - **Starting out or exploring?** Use **stdio** — one `sas-viya auth loginCode` or `uv run sas-mcp-login`, then your MCP client manages the server lifecycle.
 - **Need secure, interactive auth?** Use **HTTP** — no stored passwords, each user authenticates via browser.
 - **Deploying for a team or on a server?** Use **Docker** — portable, no Python dependency on the host, easy to integrate with orchestrators.
-- **Running it for a whole organisation?** Use **Kubernetes** — a sample manifest and a Helm chart are in [deploy/](/deploy/README.md), including the ingress routing the OAuth flow needs.
+- **Running it for a whole organisation?** Use **Kubernetes** — sample manifests and a Helm chart are in [deploy/](/deploy/README.md), including the routing the OAuth flow needs for either **Contour** (the chart's default, and the only one that can mount the server under a path prefix on an existing hostname) or **ingress-nginx**.
 - **Using Gemini CLI?** Use **stdio** — Gemini CLI does not support HTTP mode or browser-based OAuth. See [Gemini CLI configuration](examples/configuration.md#gemini-cli).
 - **Installing from a client's server catalogue?** That path runs the published container in **stdio** mode (`app-stdio`), not as an HTTP server, so it authenticates from your `~/.sas` token cache — which has to be mounted into the container at `/app/.sas`.
 
