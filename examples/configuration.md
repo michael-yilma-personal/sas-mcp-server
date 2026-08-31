@@ -108,11 +108,34 @@ therefore means re-registering the client; see
 
 If you prefer, you can use the provided registration script instead of curl. It reads your `.env` file for the endpoint, client ID, port and `MCP_BASE_URL` -- registering the external callback alongside `localhost` -- and handles self-signed certificates automatically.
 
+Preview what it would register, without contacting Viya or changing anything:
+
+```sh
+uv run python examples/register_mcp_client.py --dry-run
+```
+
+Then run it for real:
+
 ```sh
 uv run python examples/register_mcp_client.py
 ```
 
-The script will prompt for your Viya admin credentials, delete any existing client with the same ID, register a new one, and verify the registration.
+It prompts for your Viya admin credentials, prints and backs up the current registration,
+deletes it, registers the new one, and then reads the client back to confirm Viya stored every
+redirect URI it was asked for. It exits non-zero if anything failed -- a verification mismatch
+included -- and if the registration fails *after* the old client was deleted, it prints the
+exact `curl` that puts the previous definition back.
+
+| Option | Purpose |
+|---|---|
+| `--dry-run` | Print the redirect URIs and the request body that would be sent, then exit. Makes no network calls and needs no credentials. |
+| `--redirect-uri URI` | Register one more full redirect URI. Repeatable. |
+| `MCP_EXTRA_REDIRECT_URIS` | Comma-separated extra redirect URIs, for a deployment answering on more than one URL (a tunnel beside a shared host, blue/green hostnames). |
+| `VIYA_USERNAME` / `VIYA_PASSWORD` | Skip the prompts for an unattended run. Set both. |
+
+Note that if `VIYA_USERNAME` and `VIYA_PASSWORD` are already in your `.env` -- the integration
+tests use them -- the script uses those instead of prompting, and prints which user it is
+using. Check that user has admin rights, or the client calls will fail with `HTTP 403`.
 
 Congratulations! Your Viya is now configured and ready to connect with the MCP server.
 
