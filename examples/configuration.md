@@ -82,15 +82,31 @@ curl -k -X POST "https://YOUR_VIYA_ENDPOINT/SASLogon/oauth/clients" \
    -d '{"client_id": "sas-mcp",
       "scope": ["openid"],
       "authorized_grant_types": ["authorization_code","refresh_token"],
-      "redirect_uri": "http://localhost:8134/auth/callback", "autoapprove":true, "allowpublic":true}'
+      "redirect_uri": ["http://localhost:8134/auth/callback"], "autoapprove":true, "allowpublic":true}'
 ```
 
 Replace the endpoint with your own value.
 Note the client_id and the redirect_uri -- these are important for the environment file
 
+If the server will be reachable at an **external URL** rather than `localhost` -- a shared
+host, reverse proxy, tunnel or Kubernetes -- then that URL's callback has to be registered
+too, and it has to match the `MCP_BASE_URL` you set in `.env`. Register both, so the same
+client keeps working for local development:
+
+```json
+"redirect_uri": ["http://localhost:8134/auth/callback",
+                 "https://YOUR_MCP_BASE_URL/auth/callback"],
+```
+
+Viya accepts only the callbacks it was registered with, and it is Viya -- not this server --
+that rejects a mismatch, after the user has already signed in. Changing `MCP_BASE_URL` later
+therefore means re-registering the client; see
+[TROUBLESHOOTING.md](../TROUBLESHOOTING.md) if sign-in fails with
+`Invalid redirect ... did not match one of the registered values`.
+
 **Alternative: Python script**
 
-If you prefer, you can use the provided registration script instead of curl. It reads your `.env` file for the endpoint, client ID, and port, and handles self-signed certificates automatically.
+If you prefer, you can use the provided registration script instead of curl. It reads your `.env` file for the endpoint, client ID, port and `MCP_BASE_URL` -- registering the external callback alongside `localhost` -- and handles self-signed certificates automatically.
 
 ```sh
 uv run python examples/register_mcp_client.py
@@ -111,7 +127,7 @@ The .env file used by the MCP Server allows for customizable options that the us
 | `CLIENT_ID` | No | `sas-mcp` | OAuth2 Client ID registered in Viya |
 | `HOST_PORT` | No | `8134` | Host Port the local MCP Server listens on |
 | `MCP_SIGNING_KEY` | No | `default` | Secret key used to sign [FastMCP Proxy JWTs](https://gofastmcp.com/servers/auth/oauth-proxy#param-jwt-signing-key) |
-| `MCP_BASE_URL` | No | `http://localhost:{HOST_PORT}` | External URL of the MCP server (set for k8s/reverse proxy deployments) |
+| `MCP_BASE_URL` | No | `http://localhost:{HOST_PORT}` | External URL of the MCP server (set for k8s/reverse proxy deployments). Changing it requires re-running `examples/register_mcp_client.py` with Viya admin credentials, so SAS Logon accepts the new `/auth/callback` |
 | `COMPUTE_CONTEXT_NAME` | No | `SAS Job Execution compute context` | Viya compute context to use for code execution |
 | `MCP_SERVER_NAME` | No | `SAS Viya Execution MCP Server` | Name advertised to MCP clients (`serverInfo.name`); set a distinct name per deployment when running multiple servers |
 | `SSL_VERIFY` | No | `true` | Set to `false` to disable SSL certificate verification (e.g. for self-signed Viya certificates) |

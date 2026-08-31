@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`examples/register_mcp_client.py` ignored `MCP_BASE_URL`, so a server reachable at an external URL could never finish signing in.** The script hardcoded `http://localhost:{HOST_PORT}/auth/callback` as the only redirect URI it registered with SAS Logon, while `config.py` correctly derives what the *running* server presents from `MCP_BASE_URL`. Point `.env` at a shared host, reverse proxy, tunnel or Kubernetes deployment and the two disagree: the server sends the external callback, Viya only ever knew the localhost one, and **Viya** rejects the authorization request *after* the user has already signed in — `Invalid redirect ... did not match one of the registered values` — leaving no `/token` and no `/auth/callback` in the server's own log. Re-running the old script could not repair it either, because it re-registered the same wrong URI. It now derives the callback from `MCP_BASE_URL` using the same rule as `config.py` (empty, or a value left as a commented-out placeholder, falls back to localhost) and registers the external URL **alongside** `localhost`, so a single registration serves both a shared deployment and local development. Found on a shared deployment where teammates reached SAS Logon, authenticated, and were never redirected back.
+  - The `curl` path in `examples/configuration.md` carried the same hardcoded callback and now shows `redirect_uri` as a list with the external URL beside localhost, plus what has to match `MCP_BASE_URL`. `TROUBLESHOOTING.md` gains the symptom and the part that misleads: the server's own `/authorize` → `/consent` → `302` completes quickly and reads as progress, but that is *this* server's consent screen being approved immediately before it hands off to Viya — the rejection happens after that, where the server cannot log it. Both places now state the two-step rule: changing `MCP_BASE_URL` needs a restart **and** an admin re-registration, because deleting and re-creating the OAuth client is privileged and the server cannot do it itself.
+
 ## [1.11.1] - 2026-08-20
 
 ### Added

@@ -190,6 +190,70 @@ If your Viya admin has registered a specific redirect URI for the client you wan
 
 ---
 
+## HTTP: browser sign-in fails with `Invalid redirect <url>/auth/callback did not match one of the registered values`
+
+You reach the Viya SAS Logon sign-in page, submit valid credentials, and *Viya* — not this
+server — renders an error naming this server's own callback URL. Nothing appears in the MCP
+server's log: no `/token`, no `/auth/callback`. The flow dies inside Viya's `redirect_uri`
+check, before Viya ever calls back into the server.
+
+This one is about **this server acting as an OAuth client of SAS Logon**, not about an MCP
+client's registration. It surfaces once the server is reachable at an external URL — a shared
+host, reverse proxy, tunnel or Kubernetes — rather than at `localhost`.
+
+### Why this happens
+
+The redirect URI is configured in two places, and they drift apart:
+
+| Where | Role | Follows a `MCP_BASE_URL` change? |
+|---|---|---|
+| `MCP_BASE_URL` in `.env`, read by `config.py` | What the running server **presents** to Viya at `/SASLogon/oauth/authorize` | Yes, on restart |
+| The `redirect_uri` list on the `sas-mcp` client **stored in Viya** | What Viya will **accept** | **No** — only an admin re-registration changes it |
+
+So after setting `MCP_BASE_URL` and restarting, the server correctly sends the external
+callback, while Viya still only knows the URI registered when the client was first created —
+typically `http://localhost:8134/auth/callback` from the original single-user setup. Viya
+rejects every request as an unregistered redirect.
+
+Server logs are misleading here. `/authorize` → `/consent` → `302` completes quickly and looks
+like progress, but that is *this server's* own consent screen being approved, immediately
+before it redirects out to Viya. The rejection happens after that hand-off, where this server
+cannot see it — which is why `/token` never shows up.
+
+### Fix
+
+Re-run the registration script with Viya admin credentials. It derives the callback from
+`MCP_BASE_URL`, registers the external URL alongside `localhost`, and prints both before
+prompting:
+
+```sh
+uv run python examples/register_mcp_client.py
+```
+
+Then confirm what Viya actually stored:
+
+```sh
+curl -k -H "Authorization: Bearer $BEARER_TOKEN"   "https://YOUR_VIYA_ENDPOINT/SASLogon/oauth/clients/sas-mcp"
+```
+
+The returned `redirect_uri` array must contain `<MCP_BASE_URL>/auth/callback` exactly — scheme,
+host and port all matching.
+
+### Avoiding it next time
+
+Changing `MCP_BASE_URL` takes **two** steps:
+
+1. Update `.env` and restart the server. `.env` is read only at startup.
+2. Re-run `examples/register_mcp_client.py` with admin credentials, so Viya accepts the new
+   callback. This is an admin-privileged operation (it deletes and re-creates the client), so
+   the running server can never do it for you.
+
+Script versions before this fix hardcoded the localhost callback and ignored `MCP_BASE_URL`,
+so re-running them re-registered the same wrong URI. If sign-in still fails, check that your
+copy reads `MCP_BASE_URL`.
+
+---
+
 ## HTTP: `ALLOW_RAW_BEARER=true` but raw tokens still return `401 Unauthorized`
 
 The server is configured to accept raw upstream JWTs, but your `Authorization: Bearer <token>` call is still rejected.

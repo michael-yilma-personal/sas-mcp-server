@@ -13,6 +13,16 @@ load_dotenv()
 VIYA_ENDPOINT = os.getenv("VIYA_ENDPOINT", "").rstrip("/")
 CLIENT_ID = os.getenv("CLIENT_ID", "sas-mcp")
 HOST_PORT = int(os.getenv("HOST_PORT", "8134"))
+# Mirrors the rule in src/sas_mcp_server/config.py: an empty value is the
+# documented .env.sample default, and a value left as a commented-out
+# placeholder is not a URL -- both fall back to localhost. Keep the two in
+# sync. If they disagree, the running server presents Viya a redirect_uri that
+# this script never registered, and SASLogon rejects the sign-in with
+# "Invalid redirect ... did not match one of the registered values".
+_mcp_base_url = os.getenv("MCP_BASE_URL", "").strip()
+if not _mcp_base_url or _mcp_base_url.startswith("#"):
+    _mcp_base_url = f"http://localhost:{HOST_PORT}"
+MCP_BASE_URL = _mcp_base_url.rstrip("/")
 _ssl_verify_env = os.getenv("SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 if _ssl_verify_env:
@@ -53,7 +63,23 @@ def delete_client(base_url: str, token: str, client_id: str) -> bool:
         return False
 
 
-def register_client(base_url: str, token: str, client_id: str, redirect_uri: str):
+def redirect_uris() -> list[str]:
+    """Every OAuth callback the server may present to Viya.
+
+    Localhost is always registered so the same client still works for a
+    developer running the server locally, and MCP_BASE_URL is added when the
+    server is also reachable at an external URL (reverse proxy, tunnel, k8s).
+    SASLogon rejects any redirect_uri it was not registered with, so the list
+    has to cover both.
+    """
+    uris = [f"http://localhost:{HOST_PORT}/auth/callback"]
+    external = f"{MCP_BASE_URL}/auth/callback"
+    if external not in uris:
+        uris.append(external)
+    return uris
+
+
+def register_client(base_url: str, token: str, client_id: str, redirect_uri: list[str]):
     """Register a new OAuth client with SASLogon."""
     payload = {
         "client_id": client_id,
@@ -75,7 +101,8 @@ def register_client(base_url: str, token: str, client_id: str, redirect_uri: str
     )
     resp.raise_for_status()
     print(f"Client '{client_id}' registered successfully.")
-    print(f"  Redirect URI: {redirect_uri}")
+    for uri in redirect_uri:
+        print(f"  Redirect URI: {uri}")
     print("  Scopes: openid")
     print("  Grant types: authorization_code, refresh_token")
 
@@ -87,7 +114,8 @@ def main():
 
     print(f"Viya endpoint: {VIYA_ENDPOINT}")
     print(f"Client ID: {CLIENT_ID}")
-    print(f"Redirect URI: http://localhost:{HOST_PORT}/auth/callback")
+    for uri in redirect_uris():
+        print(f"Redirect URI: {uri}")
     print()
 
     username = input("Viya admin username: ")
@@ -99,9 +127,7 @@ def main():
 
     # Delete existing client if present, then re-register
     delete_client(VIYA_ENDPOINT, token, CLIENT_ID)
-    register_client(
-        VIYA_ENDPOINT, token, CLIENT_ID, f"http://localhost:{HOST_PORT}/auth/callback"
-    )
+    register_client(VIYA_ENDPOINT, token, CLIENT_ID, redirect_uris())
 
     # Verify the registration
     print("\nVerifying registration...")
