@@ -6,7 +6,7 @@ Starter MCP Server for SAS Viya, utilizing the SAS Viya OAuth flow for authentic
 Handles session management, job submission, and result retrieval using httpx.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -16,6 +16,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.middleware import Middleware as StarletteMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -23,6 +24,7 @@ from .config import (
     ALLOW_RAW_BEARER,
     AUTH_ENABLED,
     MCP_BASE_URL,
+    MCP_CORS_ORIGINS,
     MCP_LANDING_PAGE,
     MCP_READ_ONLY,
     SERVER_NAME,
@@ -133,11 +135,32 @@ async def _landing_facts() -> ServerFacts:
     )
 
 
+def cors_middleware(origins: Sequence[str]) -> StarletteMiddleware:
+    """CORS policy for a browser-based MCP client on another origin.
+
+    MCP streamable HTTP uses ``POST`` (requests), ``GET`` (the SSE stream) and
+    ``DELETE`` (session termination), so all three are allowed. The browser
+    must read ``mcp-session-id`` off the initialize response to send it with
+    every later request, so that header is exposed. Authentication is not
+    touched: the preflight passes, then the request meets the same bearer
+    check as any other.
+    """
+    return StarletteMiddleware(
+        CORSMiddleware,
+        allow_origins=list(origins),
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id"],
+    )
+
+
 # Starlette middleware wraps the router, so this runs BEFORE the
 # RequireAuthMiddleware FastMCP puts on the MCP route — the only place a
 # browser GET can be answered with a page instead of the 401. Everything that
 # is not `GET /mcp` + `Accept: text/html` is passed through untouched.
 _http_middleware: list[StarletteMiddleware] = []
+if MCP_CORS_ORIGINS:
+    _http_middleware.append(cors_middleware(MCP_CORS_ORIGINS))
 if MCP_LANDING_PAGE:
     _http_middleware.append(
         StarletteMiddleware(LandingPageMiddleware, path=MCP_PATH, facts=_landing_facts)

@@ -101,6 +101,17 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "get_decision_flow_code",
         "list_decision_flow_revisions",
         "get_decision_flow_revision",
+        # Tier 9 — SAS Code Assistance & Documentation. Each returns copilot
+        # text and changes nothing server-side.
+        "code_assistant_get_doc_answer",
+        "code_assistant_explain_code",
+        "code_assistant_generate_code",
+        "code_assistant_format_code",
+        "code_assistant_add_comment",
+        "code_assistant_find_problems",
+        "code_assistant_show_examples",
+        "code_assistant_refine_code",
+        "code_assistant_analyze_log",
     }
 )
 
@@ -210,7 +221,8 @@ IDEMPOTENT_WRITE_TOOLS: frozenset[str] = frozenset(
 
 # Can reach beyond the one authenticated Viya deployment: arbitrary SAS code
 # (PROC HTTP, FILENAME URL, ...) and the upload tools' `url` source. Every
-# other tool talks only to Viya, so its world is closed.
+# other tool talks only to Viya, so its world is closed — the Tier 9 copilot
+# tools included: they give the caller no URL, model or provider to steer.
 OPEN_WORLD_TOOLS: frozenset[str] = frozenset(
     {
         "execute_sas_code",

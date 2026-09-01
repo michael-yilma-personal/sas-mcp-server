@@ -21,7 +21,7 @@ data:
   MCP_LANDING_PAGE: {{ .Values.server.landingPage | quote }}
   {{- /* toString, NOT `with`: Go templates treat the integer 0 as false, so
          `--set server.tiers=0` would drop this key entirely and the server
-         would fall back to registering EVERY tier. */}}
+         would fall back to registering every core tier. */}}
   {{- $tiers := .Values.server.tiers | toString }}
   {{- if ne $tiers "" }}
   MCP_TIERS: {{ $tiers | quote }}

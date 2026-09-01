@@ -10,7 +10,7 @@ from sas_mcp_server import tools
 from sas_mcp_server.tools._access import READ_ONLY_TOOLS, WRITE_TOOLS, ReadOnlyGate
 
 
-async def _register(tiers=None, read_only=None):
+async def _register(tiers="", read_only=None):
     mcp = FastMCP("read-only-test")
 
     async def get_token(ctx):
@@ -19,6 +19,11 @@ async def _register(tiers=None, read_only=None):
     tools.register_tools(mcp, get_token, tiers=tiers, read_only=read_only)
     async with Client(mcp) as client:
         return {t.name for t in await client.list_tools()}
+
+
+async def _expected_read_only_tools() -> set[str]:
+    """Read tools of the default selection: the classification minus what only opt-in Tier 9 registers."""
+    return set(READ_ONLY_TOOLS) - await _register(tiers=tools.OPTIONAL_TIERS)
 
 
 # --- the classification covers the whole surface ------------------------------
@@ -30,7 +35,7 @@ async def test_classification_partitions_every_registered_tool():
     A tool added to a tier without being classified fails here, and is withheld
     in read-only mode until someone decides which side it belongs on.
     """
-    registered = await _register()
+    registered = await _register(tiers=tools.ALL_TIERS)
     classified = READ_ONLY_TOOLS | WRITE_TOOLS
     assert registered - classified == set(), "unclassified tool(s) — add to _access.py"
     assert classified - registered == set(), "classified tool(s) that no tier registers"
@@ -45,7 +50,7 @@ def test_read_and_write_sets_are_disjoint():
 
 async def test_read_only_registers_only_read_tools():
     names = await _register(read_only=True)
-    assert names == set(READ_ONLY_TOOLS)
+    assert names == await _expected_read_only_tools()
     assert len(names) == 43
 
 
@@ -115,7 +120,7 @@ async def test_composes_with_tier_range():
 
 async def test_env_var_drives_default(monkeypatch):
     monkeypatch.setattr(tools, "MCP_READ_ONLY", True)
-    assert await _register() == set(READ_ONLY_TOOLS)
+    assert await _register() == await _expected_read_only_tools()
     monkeypatch.setattr(tools, "MCP_READ_ONLY", False)
     assert len(await _register()) == 75
 
@@ -124,7 +129,7 @@ async def test_explicit_argument_overrides_env_var(monkeypatch):
     monkeypatch.setattr(tools, "MCP_READ_ONLY", True)
     assert len(await _register(read_only=False)) == 75
     monkeypatch.setattr(tools, "MCP_READ_ONLY", False)
-    assert await _register(read_only=True) == set(READ_ONLY_TOOLS)
+    assert await _register(read_only=True) == await _expected_read_only_tools()
 
 
 # --- the gate itself ----------------------------------------------------------

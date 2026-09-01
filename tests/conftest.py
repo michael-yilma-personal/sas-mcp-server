@@ -194,6 +194,7 @@ def mcp_server_with_mock_client():
     # and into the compute tier (reset_compute_session calls it directly); patch
     # both so every tool's client resolves to the mock.
     with (
+        patch("sas_mcp_server.tools.code_assistant.make_client", return_value=mock_client),
         patch("sas_mcp_server.tools._common.make_client", return_value=mock_client),
         patch("sas_mcp_server.tools.compute.make_client", return_value=mock_client),
     ):

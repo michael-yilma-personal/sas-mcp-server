@@ -10,9 +10,10 @@ shared lower layers (``viya_client``, ``viya_utils``, ``config``) plus
 its own.
 
 :func:`register_tools` registers every *enabled* tier. Operators choose the set
-with the ``MCP_TIERS`` env var (e.g. ``"0-4"`` or ``"0,1,7"``); unset means all
-tiers. Callers may also pass ``tiers=`` explicitly (a spec string or an iterable
-of tier numbers), which overrides the env var.
+with the ``MCP_TIERS`` env var (e.g. ``"0-4"`` or ``"0,1,7"``); unset means the
+core tiers (0-8). Tier 9 (Code Assistance) is optional and selected explicitly.
+Callers may also pass ``tiers=`` explicitly (a spec string or an iterable of
+tier numbers), which overrides the env var.
 
 A second, independent axis selects *verbs* rather than domains: ``MCP_READ_ONLY``
 (or ``read_only=``) withholds every tool that could change server-side state or
@@ -30,6 +31,7 @@ from ..exceptions import ConfigError
 from ..viya_client import logger
 from . import (
     automl,
+    code_assistant,
     compute,
     data_ops,
     decisioning,
@@ -61,6 +63,7 @@ _TIER_REGISTRARS: dict[int, Registrar] = {
     6: model_scoring.register,
     7: decisioning.register,
     8: workbench.register,
+    9: code_assistant.register,
 }
 
 TIER_TITLES: dict[int, str] = {
@@ -73,9 +76,14 @@ TIER_TITLES: dict[int, str] = {
     6: "Model Management & Scoring",
     7: "Decisioning (SAS Intelligent Decisioning)",
     8: "Workbench (Execute Code Only)",
+    9: "SAS Code Assistance & Documentation",
 }
 
 ALL_TIERS: frozenset[int] = frozenset(_TIER_REGISTRARS)
+# Tiers a deployment only gets by naming them in MCP_TIERS; everything else is
+# what an unset MCP_TIERS registers.
+OPTIONAL_TIERS: frozenset[int] = frozenset({9})
+DEFAULT_TIERS: frozenset[int] = ALL_TIERS - OPTIONAL_TIERS
 
 # tool name -> tier, filled in as the tiers register. Telemetry stamps it on
 # every record so usage can be rolled up per tier (which tiers earn their place
@@ -154,17 +162,17 @@ def resolve_enabled_tiers(tiers: str | Iterable[int] | None = None) -> set[int]:
 
     Precedence: an explicit *tiers* argument wins (a spec string like ``"0-4"``
     or an iterable of tier ints); otherwise the ``MCP_TIERS`` env var is used; if
-    neither selects anything, all tiers are enabled.
+    neither selects anything, the core tiers (0-8) are enabled.
     """
     if tiers is None:
         tiers = MCP_TIERS
     if isinstance(tiers, str):
-        return _parse_tier_spec(tiers) or set(ALL_TIERS)
+        return _parse_tier_spec(tiers) or set(DEFAULT_TIERS)
     selected = {int(t) for t in tiers}
     unknown = selected - ALL_TIERS
     if unknown:
         raise ConfigError(f"Unknown tier(s) {sorted(unknown)}; valid tiers are {sorted(ALL_TIERS)}.")
-    return selected or set(ALL_TIERS)
+    return selected or set(DEFAULT_TIERS)
 
 
 def register_tools(
@@ -182,7 +190,7 @@ def register_tools(
             a cached token or runs a device-code flow.
         tiers: Optional tier selection — a spec string (``"0-4,7"``), an iterable
             of tier numbers, or ``None`` to use the ``MCP_TIERS`` env var (all
-            tiers when unset).
+            core tiers when unset).
         read_only: When true, register only the read-only tools of the enabled
             tiers; mutating tools are never registered, so they do not appear in
             ``list_tools``. ``None`` uses the ``MCP_READ_ONLY`` env var.
@@ -210,9 +218,11 @@ def register_tools(
 
 __all__ = [
     "ALL_TIERS",
+    "DEFAULT_TIERS",
     "DESTRUCTIVE_TOOLS",
     "IDEMPOTENT_WRITE_TOOLS",
     "OPEN_WORLD_TOOLS",
+    "OPTIONAL_TIERS",
     "READ_ONLY_TOOLS",
     "TIER_TITLES",
     "TOOL_TIERS",

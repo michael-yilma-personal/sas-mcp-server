@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for executing SAS code, training AutoML pr
 
 ## Features
 
-- 75 tools across 9 selectable tiers, spanning the Analytics Life Cycle on SAS Viya
+- 75 tools across 9 selectable tiers, spanning the Analytics Life Cycle on SAS Viya, plus an opt-in Tier 9 of nine SAS Code Assistant tools
 - Prompt Templates for improving your SAS Code
 - OAuth2 authentication with PKCE flow
 - HTTP-based MCP server compatible with MCP clients
@@ -143,7 +143,7 @@ If your compute deployment does not expose `/compute/contexts` and only supports
 
 ### Limiting exposed tools (tiers)
 
-Tools are grouped into numbered tiers. By default the server exposes all of them; set `MCP_TIERS` to expose only a subset — handy for keeping a client's tool list small and focused, or hiding capabilities a deployment shouldn't offer. Accepts ranges and comma lists (e.g. `MCP_TIERS=0-4` or `MCP_TIERS=0,1,6,7`); unset means all tiers.
+Tools are grouped into numbered tiers. By default the server exposes the core tiers 0–8; set `MCP_TIERS` to expose only a subset — handy for keeping a client's tool list small and focused, or hiding capabilities a deployment shouldn't offer — or to add the opt-in Tier 9. Accepts ranges and comma lists (e.g. `MCP_TIERS=0-4`, `MCP_TIERS=0,1,6,7`, or `MCP_TIERS=0-9`); unset means tiers 0–8.
 
 | Tier | Group |
 |---|---|
@@ -156,6 +156,7 @@ Tools are grouped into numbered tiers. By default the server exposes all of them
 | 6 | Model Management & Scoring |
 | 7 | Decisioning (SAS Intelligent Decisioning) |
 | 8 | Workbench (Execute Code Only) |
+| 9 | SAS Code Assistance & Documentation (opt-in) |
 
 ```sh
 # Example: expose only compute/discovery/data-ops and reporting
@@ -295,6 +296,27 @@ Build and manage SAS Intelligent Decisioning rule sets and decision flows end to
 
 #### Tier 8 — Workbench (Execute Code Only)
 - **execute_sas_code**: Execute SAS code snippets and retrieve execution results (log and listing output). Runs in a reusable compute session that is kept warm across calls, so SAS state (WORK tables, macro variables, assigned librefs) persists between successive calls
+
+#### Tier 9 — SAS Code Assistance & Documentation (opt-in)
+Tier 9 calls the SAS Code Assistant copilot through Viya's own REST API, using
+the authenticated user's Viya bearer token — no separate GenAI/LLM API key or
+RAG URL is required. When Tier 9 is selected (`MCP_TIERS=0-9`, or any spec
+naming `9`), the server calls `<VIYA_ENDPOINT>/genAiGateway/v1/copilotRequest`;
+Viya owns model selection and routes code or documentation requests internally.
+Every Tier 9 tool is read-only — it returns text and changes nothing on the
+server — so all nine survive `MCP_READ_ONLY=true`. Tier 9 intentionally does
+**not** add a code-execution tool; use Tier 0 or Tier 8 `execute_sas_code`
+when execution is required.
+
+- **code_assistant_get_doc_answer**: Answer a SAS documentation question
+- **code_assistant_explain_code**: Explain SAS, Python, or R source code
+- **code_assistant_generate_code**: Generate SAS, Python, or R code from requirements
+- **code_assistant_format_code**: Format SAS, Python, or R source code
+- **code_assistant_add_comment**: Add comments while preserving behavior
+- **code_assistant_find_problems**: Find potential problems and suggest fixes
+- **code_assistant_show_examples**: Show three examples based on code or requirements
+- **code_assistant_refine_code**: Refine code while preserving behavior
+- **code_assistant_analyze_log**: Identify causes of errors and warnings in a log
 
 ### Prompt Templates
 

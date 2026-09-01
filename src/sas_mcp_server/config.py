@@ -91,7 +91,8 @@ CONTEXT_NAME = os.getenv("COMPUTE_CONTEXT_NAME", "SAS Job Execution compute cont
 DEFAULT_SERVER_NAME = "SAS Viya Execution MCP Server"
 SERVER_NAME = os.getenv("MCP_SERVER_NAME", DEFAULT_SERVER_NAME)
 COMPUTE_SESSION_ID = os.getenv("COMPUTE_SESSION_ID", "").strip()
-# Optional tool-tier selection, e.g. "0-4" or "0,1,7". Empty means all tiers.
+# Optional tool-tier selection, e.g. "0-4" or "0,1,7". Empty means the core
+# tiers 0-8; Tier 9 (Code Assistance) is opt-in and must be named.
 # Parsed by sas_mcp_server.tools.resolve_enabled_tiers.
 MCP_TIERS = os.getenv("MCP_TIERS", "")
 # Read-only mode: register only tools that neither change server-side state nor
@@ -99,6 +100,15 @@ MCP_TIERS = os.getenv("MCP_TIERS", "")
 # cuts across tiers, so this filters whichever tiers are enabled. Default OFF.
 # Classification lives in sas_mcp_server.tools._access.READ_ONLY_TOOLS.
 MCP_READ_ONLY = env_bool("MCP_READ_ONLY", False)
+# Browser origins allowed to call the HTTP MCP endpoint, comma-separated. A
+# browser-based MCP client on another origin sends an OPTIONS preflight before
+# its cross-origin Authorization request; without a CORS policy that preflight
+# fails before authentication is ever attempted. Default empty: no CORS
+# middleware is installed, so nothing widens unless an operator opts in with
+# the exact origin(s) of the client. Authentication is unchanged either way.
+MCP_CORS_ORIGINS: tuple[str, ...] = tuple(
+    origin.strip() for origin in os.getenv("MCP_CORS_ORIGINS", "").split(",") if origin.strip()
+)
 # Browser landing page on the MCP endpoint (HTTP mode). A plain browser GET of
 # /mcp (Accept: text/html) gets an explanatory page with the tool catalogue and
 # client-config snippets instead of FastMCP's bare 401. Unauthenticated by

@@ -16,14 +16,17 @@ async def _register(tiers):
     async def get_token(ctx):
         return "test-token"
 
-    tools.register_tools(mcp, get_token, tiers=tiers)
+    # None normally defers to MCP_TIERS. These registration assertions cover
+    # the default core surface, independent of an optional Tier 9 configured
+    # in a developer's environment.
+    tools.register_tools(mcp, get_token, tiers="" if tiers is None else tiers)
     async with Client(mcp) as client:
         return {t.name for t in await client.list_tools()}
 
 
-def test_resolve_empty_selection_is_all_tiers():
-    assert tools.resolve_enabled_tiers("") == set(tools.ALL_TIERS)
-    assert tools.resolve_enabled_tiers([]) == set(tools.ALL_TIERS)
+def test_resolve_empty_selection_is_default_tiers():
+    assert tools.resolve_enabled_tiers("") == set(tools.DEFAULT_TIERS)
+    assert tools.resolve_enabled_tiers([]) == set(tools.DEFAULT_TIERS)
 
 
 def test_resolve_range_list_and_csv():
@@ -33,7 +36,7 @@ def test_resolve_range_list_and_csv():
     assert tools.resolve_enabled_tiers([2, 3]) == {2, 3}
 
 
-@pytest.mark.parametrize("bad", ["0-99", "9", "abc", [42]])
+@pytest.mark.parametrize("bad", ["0-99", "10", "abc", [42]])
 def test_resolve_rejects_unknown_tiers(bad):
     with pytest.raises(ConfigError):
         tools.resolve_enabled_tiers(bad)
@@ -43,10 +46,10 @@ def test_env_var_drives_default(monkeypatch):
     monkeypatch.setattr(tools, "MCP_TIERS", "0-4")
     assert tools.resolve_enabled_tiers(None) == {0, 1, 2, 3, 4}
     monkeypatch.setattr(tools, "MCP_TIERS", "")
-    assert tools.resolve_enabled_tiers(None) == set(tools.ALL_TIERS)
+    assert tools.resolve_enabled_tiers(None) == set(tools.DEFAULT_TIERS)
 
 
-async def test_register_all_tiers_registers_everything():
+async def test_register_default_tiers_registers_the_core_surface():
     names = await _register(None)
     assert len(names) == 75
     assert "execute_sas_code" in names

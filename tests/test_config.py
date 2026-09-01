@@ -115,3 +115,21 @@ def test_config_mcp_base_url_comment_value_falls_back_to_default(monkeypatch):
     with patch("dotenv.load_dotenv"):
         cfg = _reload_config()
     assert cfg.MCP_BASE_URL == "http://localhost:8134"
+
+
+def test_config_cors_origins_default_is_empty(monkeypatch):
+    """Unset MCP_CORS_ORIGINS means no CORS policy at all, not a localhost default."""
+    monkeypatch.setenv("VIYA_ENDPOINT", "https://test.viya.com")
+    monkeypatch.delenv("MCP_CORS_ORIGINS", raising=False)
+    with patch("dotenv.load_dotenv"):
+        cfg = _reload_config()
+    assert cfg.MCP_CORS_ORIGINS == ()
+
+
+def test_config_cors_origins_parses_comma_list(monkeypatch):
+    """Whitespace and empty items are dropped; order is preserved."""
+    monkeypatch.setenv("VIYA_ENDPOINT", "https://test.viya.com")
+    monkeypatch.setenv("MCP_CORS_ORIGINS", " https://app.example.com, http://localhost:5173 ,, ")
+    with patch("dotenv.load_dotenv"):
+        cfg = _reload_config()
+    assert cfg.MCP_CORS_ORIGINS == ("https://app.example.com", "http://localhost:5173")

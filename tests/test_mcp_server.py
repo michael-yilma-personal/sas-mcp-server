@@ -11,6 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from mcp.server.auth.provider import AccessToken
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from sas_mcp_server import mcp_server
 from sas_mcp_server.mcp_server import AuthenticationError
@@ -218,3 +222,57 @@ async def test_http_no_bearer_is_401():
     """A /mcp request with no Authorization header is refused by the HTTP auth layer."""
     resp = await _post_initialize(None)
     assert resp.status_code == 401
+
+
+# --- CORS for browser-based clients (MCP_CORS_ORIGINS) --------------------------
+
+
+def test_cors_middleware_is_installed_only_when_origins_are_set():
+    """The origin list is read at import; assert the wiring matches its current value."""
+    installed = any(m.cls is CORSMiddleware for m in mcp_server._http_middleware)
+    assert installed is bool(mcp_server.MCP_CORS_ORIGINS)
+
+
+@pytest.mark.asyncio
+async def test_cors_policy_covers_every_streamable_http_verb_and_exposes_session_id():
+    """What a browser-based MCP client actually needs from the policy.
+
+    The preflight before a cross-origin Authorization request must pass for
+    POST (requests), GET (the SSE stream) and DELETE (session termination), and
+    the browser must be allowed to read ``mcp-session-id`` off the response so
+    it can send it with every later request. An origin not on the list is
+    refused at the preflight, so the policy widens exactly what was asked for.
+    """
+    def endpoint(request):
+        return PlainTextResponse("ok", headers={"mcp-session-id": "s1"})
+
+    app = Starlette(
+        routes=[Route("/mcp", endpoint, methods=["GET", "POST", "DELETE"])],
+        middleware=[mcp_server.cors_middleware(["https://app.example.com"])],
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://server") as c:
+        for verb in ("POST", "GET", "DELETE"):
+            preflight = await c.options(
+                "/mcp",
+                headers={
+                    "Origin": "https://app.example.com",
+                    "Access-Control-Request-Method": verb,
+                    "Access-Control-Request-Headers": "authorization, mcp-session-id",
+                },
+            )
+            assert preflight.status_code == 200, verb
+            assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
+            allowed = {m.strip() for m in preflight.headers["access-control-allow-methods"].split(",")}
+            assert {"GET", "POST", "DELETE"} <= allowed
+            assert "authorization" in preflight.headers["access-control-allow-headers"].lower()
+
+        actual = await c.post("/mcp", headers={"Origin": "https://app.example.com"})
+        assert actual.status_code == 200
+        assert "mcp-session-id" in actual.headers["access-control-expose-headers"].lower()
+
+        other = await c.options(
+            "/mcp",
+            headers={"Origin": "https://evil.example.com", "Access-Control-Request-Method": "POST"},
+        )
+        assert other.status_code == 400
+        assert "access-control-allow-origin" not in other.headers

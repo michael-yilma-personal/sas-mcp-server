@@ -44,7 +44,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import DEFAULT_SERVER_NAME
 from .helpers.telemetry_helpers import server_version
-from .tools import ALL_TIERS, TIER_TITLES, TOOL_TIERS, resolve_enabled_tiers
+from .tools import ALL_TIERS, DEFAULT_TIERS, TIER_TITLES, TOOL_TIERS, resolve_enabled_tiers
 
 __all__ = [
     "LandingPageMiddleware",
@@ -155,7 +155,12 @@ class ServerFacts:
 
     @property
     def all_tiers_enabled(self) -> bool:
-        return self.effective_tiers >= ALL_TIERS
+        """Whether every default (Tier 0–8) tool domain is enabled.
+
+        Optional tiers such as Tier 9 (Code Assistance) do not make a core
+        deployment look partial when they are not selected.
+        """
+        return self.effective_tiers >= DEFAULT_TIERS
 
 
 def summarize(description: str | None, *, max_len: int = _SUMMARY_MAX) -> str:
@@ -501,7 +506,7 @@ def render_page(facts: ServerFacts, *, nonce: str) -> str:
         if facts.all_tiers_enabled
         else (
             f'<span class="badge">Tiers {_e(_tier_range(facts.enabled_tiers))} '
-            f"of {_e(_tier_range(frozenset(ALL_TIERS)))}</span>"
+            f"of {_e(_tier_range(ALL_TIERS))}</span>"
         )
     )
     ro_badge = (
